@@ -27,6 +27,8 @@
 > - 配音改 `TTS_MODEL=eleven_v3`（ElevenLabs 唯一支持泰语 `th` 的模型）。
 > - 字幕字体改 `subtitles.font: assets/fonts/Kanit-Bold.ttf`（Montserrat 不含泰文字形会变豆腐块）。泰/中/日等无空格语言按 `subtitles.max_chars` 切分，且直接用脚本原文做字幕（不依赖 whisper，避免无空格语言转写出错）。
 
+**爆款「通用接口模版」**：12 个被验证过的 TikTok/FB 带货爆款结构（PAS 痛点-放大-解决、前后对比、质疑测评、开箱、悬念循环、清单、POV 故事、对比 PK、教程、解压 ASMR、工厂溯源 B2B、老板出镜 B2B）沉淀成可复用模版，用来**指导 AI 怎么拍**。生成脚本时模版库会作为菜单喂给 LLM：`viral_template: auto` 让 AI 自选最契合的一个结构并在结构内自由发挥（不写死台词，避免同质化），也可钉死某个 id 做 A/B。清单见 [`docs/VIRAL_TEMPLATES.md`](docs/VIRAL_TEMPLATES.md)，机器实现 `pipeline/templates.py`，命令行 `python -m pipeline.run --list-templates` 可查看全部。
+
 > 内容打法（买家画像 / 痛点公式 / 两套分镜脚本模板 / TikTok·FB 原生形式差异）见 [`docs/STRATEGY.md`](docs/STRATEGY.md)。
 > 流水线里 `prompts/factory_persona.md`（工厂展示·B2B）与 `prompts/product_persona.md`（单品带货·B2C）就是这套打法喂给 LLM 的角色提示。
 
@@ -35,6 +37,7 @@
 ```
 pipeline/
   config.py           读取 YAML 任务配置 + .env 密钥
+  templates.py        爆款「通用接口模版」库（12 个结构，指导 AI 怎么拍；脚本生成时注入 LLM）
   script_model.py     分镜脚本数据结构
   providers/
     llm.py            文案/分镜脚本（grsai gpt-5.5；OpenAI 兼容；无 key 用模板兜底）

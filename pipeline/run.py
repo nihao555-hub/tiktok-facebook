@@ -19,7 +19,7 @@ import shutil
 from pathlib import Path
 
 from . import ffmpeg_utils as ff
-from . import mixer, subtitles
+from . import mixer, subtitles, templates
 from .config import REPO_ROOT, Secrets, TaskConfig
 from .providers import clipgen, llm, tts
 from .script_model import Script
@@ -78,7 +78,10 @@ def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool) -> l
 
     script = llm.generate_script(cfg, secrets)
     (outdir / "script.json").write_text(script.to_json(), encoding="utf-8")
-    print(f"[1/5] 脚本就绪：{len(script.scenes)} 个分镜，hook=\"{script.hook}\"")
+    tpl = templates.get(script.template_used)
+    tpl_name = tpl["name_zh"] if tpl else (script.template_used or "auto")
+    print(f"[1/5] 脚本就绪：{len(script.scenes)} 个分镜，"
+          f"爆款结构=[{script.template_used or 'auto'}]{tpl_name}，hook=\"{script.hook}\"")
 
     base, voice, words = _prepare_assets(script, cfg, secrets, work)
     total = ff.duration(base)
@@ -140,7 +143,16 @@ def main() -> None:
     ap.add_argument("--config", default=str(REPO_ROOT / "config.yaml"))
     ap.add_argument("--no-capcut", action="store_true", help="不导出剪映/CapCut 草稿")
     ap.add_argument("--publish", action="store_true", help="强制发布（覆盖 config 开关）")
+    ap.add_argument("--list-templates", action="store_true",
+                    help="列出全部爆款通用接口模版后退出")
     args = ap.parse_args()
+
+    if args.list_templates:
+        for t in templates.VIRAL_TEMPLATES:
+            applies = "/".join(t["applies_to"])
+            print(f"[{t['id']}] {t['name']}（{t['name_zh']}） · 适用: {applies}")
+            print(f"    {t['best_for']}")
+        return
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():

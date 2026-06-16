@@ -6,6 +6,13 @@ template: product          # factory | product
 language: en               # 文案/配音语言 (en|th|zh|id|vi|ms...)
                            # 注：泰语 th 请配合 TTS_MODEL=eleven_v3 + 泰文字体 Kanit-Bold.ttf
 
+# 爆款「通用接口模版」：指导 AI 按验证过的爆款结构拍片（详见 docs/VIRAL_TEMPLATES.md）
+# auto = 让 AI 从模版库自选最契合的一个；或钉死某个 id 做 A/B：
+#   pas|before_after|i_tested_it|unboxing|wait_for_it|listicle|pov_story|
+#   comparison|tutorial|satisfying_asmr|factory_tour|founder_direct
+# 查看全部：python -m pipeline.run --list-templates
+viral_template: auto
+
 video:
   width: 1080
   height: 1920             # 9:16 竖屏 (TikTok/Reels 原生)

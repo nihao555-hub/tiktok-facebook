@@ -9,6 +9,7 @@ import json
 import re
 import time
 
+from .. import templates
 from ..config import REPO_ROOT, Secrets, TaskConfig
 from ..script_model import Scene, Script
 
@@ -37,10 +38,16 @@ question, shocking number, before/after, mini-story, myth-busting, "things I wis
 Vary pacing, scene ideas and wording every time. It must feel like a native organic clip a
 real creator posted, NOT a polished commercial. Do not say the word "ad".
 
+STRUCTURE (IMPORTANT): you will be given a library of proven viral structures (or one
+pinned structure). Build the scenes so they FOLLOW the chosen structure's beats in order,
+but improvise the wording, hook angle and shots freely inside it — never canned lines.
+Return the id of the structure you used in "template_used".
+
 Return STRICT JSON only, matching this schema:
 {
   "hook": "first 3s on-screen text (scroll-stopper)",
   "cta": "final call to action",
+  "template_used": "the viral structure id you followed",
   "scenes": [
     {"index": 0,
      "image_prompt": "one photorealistic still to generate",
@@ -96,6 +103,23 @@ def _available_refs() -> list[str]:
     return sorted(p.name for p in d.iterdir() if p.suffix.lower() in _IMAGE_EXT)
 
 
+def _structure_directive(cfg: TaskConfig) -> str:
+    """注入爆款结构：viral_template=auto 时给菜单让 AI 选；钉死某 id 时给详细 beats。"""
+    pinned = (cfg.get("viral_template", default="auto") or "auto").strip().lower()
+    if pinned and pinned != "auto" and templates.get(pinned):
+        return (
+            "VIRAL STRUCTURE (pinned):\n"
+            f"{templates.spec(pinned)}\n"
+            f'Set "template_used" to "{pinned}".'
+        )
+    return (
+        "VIRAL STRUCTURE LIBRARY — choose the ONE structure that best fits this product/"
+        "audience, then build the scenes to follow its beats (improvise wording/shots inside):\n"
+        f"{templates.menu(cfg.template)}\n"
+        'Pick the best-fitting id and set "template_used" to it.'
+    )
+
+
 def _user_prompt(cfg: TaskConfig) -> str:
     brief = cfg.get("brief", default={}) or {}
     n = int(cfg.get("clipgen", "scene_count", default=5))
@@ -107,7 +131,8 @@ def _user_prompt(cfg: TaskConfig) -> str:
     )
     return (
         f"Persona & format guide:\n{_persona_prompt(cfg.template)}\n\n"
-        f"Template: {cfg.template}\n{_lang_directive(cfg)}\n"
+        f"Template: {cfg.template}\n{_lang_directive(cfg)}\n\n"
+        f"{_structure_directive(cfg)}\n\n"
         f"Target total length: ~{cfg.target_seconds}s across {n} scenes.\n"
         f"{refs_line}"
         f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
@@ -177,7 +202,10 @@ def _template_fallback(cfg: TaskConfig) -> Script:
         ]
         hook = "POV: this annoys you daily 😩"
 
-    return Script(template=cfg.template, language=cfg.language, hook=hook, cta=cta, scenes=scenes)
+    pinned = (cfg.get("viral_template", default="auto") or "auto").strip().lower()
+    used = pinned if templates.get(pinned) else ("factory_tour" if cfg.template == "factory" else "pas")
+    return Script(template=cfg.template, language=cfg.language, hook=hook, cta=cta,
+                  scenes=scenes, template_used=used)
 
 
 def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3) -> Script:
@@ -207,6 +235,9 @@ def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3) -> Script:
                 raise ValueError("LLM 未返回 scenes")
             data.setdefault("template", cfg.template)
             data.setdefault("language", cfg.language)
+            pinned = (cfg.get("viral_template", default="auto") or "auto").strip().lower()
+            if templates.get(pinned):
+                data.setdefault("template_used", pinned)
             return Script.from_dict(data)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc

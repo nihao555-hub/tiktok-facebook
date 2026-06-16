@@ -34,6 +34,7 @@ class Script:
     hook: str                   # 前 3 秒钩子（覆盖 scene[0].on_screen_text）
     cta: str
     scenes: list[Scene] = field(default_factory=list)
+    template_used: str = ""     # 本条采用的爆款结构 id（见 pipeline/templates.py）
 
     @property
     def full_narration(self) -> str:
@@ -56,4 +57,5 @@ class Script:
             hook=d.get("hook", ""),
             cta=d.get("cta", ""),
             scenes=scenes,
+            template_used=d.get("template_used", ""),
         )
