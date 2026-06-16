@@ -34,24 +34,23 @@ tts:
   rate: "+8%"              # 语速
   volume: "+0%"
 
-# 字幕（卡拉OK逐字高亮，平台原生感）
+# 字幕（短句逐句弹入 pop-in，白字黑描边，平台原生感）
 subtitles:
   enabled: true
   whisper_model: small     # tiny|base|small|medium  （越大越准越慢）
-  font: "DejaVu Sans"      # 字体名；也可填 assets/fonts/xxx.ttf 路径
-  font_size: 64
+  font: "assets/fonts/Montserrat-Bold.ttf"  # 原生风格粗体；也可填字体名
+  font_size: 54            # 留空则按分辨率自适应（基准 720x1280）
   max_words: 3             # 每屏最多几个词（TikTok 逐词/短句风格）
-  primary_color: "&H00FFFFFF"     # 白
-  highlight_color: "&H0000FFFF"   # 黄 (高亮)
-  margin_v: 320
+  primary_color: "&H00FFFFFF"     # 白字 + 黑描边（原生爆款字幕样式）
+  margin_v: 300            # 字幕在下三分之一，避开底部 UI 安全区
 
-# 平台原生装饰
+# 平台原生装饰（对标 TikTok/Reels 真实形式）
 decorate:
   bgm: ""                  # 留空=不加；填 media/bgm/xxx.mp3
   bgm_volume: 0.18
-  logo: ""                 # 品牌水印 png，留空=不加
-  progress_bar: true       # 顶部进度条
-  cta_sticker: true        # 结尾 CTA 贴纸（用 brief.cta 文本）
+  logo: ""                 # 品牌水印 png，留空=不加（建议留空，原生视频不挂大 logo）
+  progress_bar: false      # 顶部进度条非原生，默认关闭
+  cta_sticker: true        # 左下角 TikTok 红购物按钮样式 CTA（用 brief.cta 文本）
   strip_ai_watermark: true # 裁掉 AI 视频右下角角标水印（看不出 AI）
 
 # 批量 A/B 多版本（投流测素材）：会按下面的组合各产一条

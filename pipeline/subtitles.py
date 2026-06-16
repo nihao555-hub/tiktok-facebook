@@ -61,12 +61,23 @@ def _chunk(words: list[tuple[float, float, str]], max_words: int) -> list[Chunk]
 
 
 def _font_setup(font: str) -> tuple[str, str | None]:
-    """返回 (FontName, fontsdir)。font 可以是字体名或 .ttf/.otf 路径。"""
+    """返回 (FontName, fontsdir)。font 可以是字体名或 .ttf/.otf 路径。
+
+    传路径时用真实的字体家族名（不是文件名）作为 FontName，否则 libass 匹配不到会回退到
+    DejaVu，字幕就不是我们想要的原生粗体了。
+    """
     p = Path(font)
     if not p.is_absolute():
         p = REPO_ROOT / font
     if p.exists() and p.suffix.lower() in {".ttf", ".otf"}:
-        return p.stem, str(p.parent)
+        family = p.stem
+        try:
+            from PIL import ImageFont
+
+            family = ImageFont.truetype(str(p), 32).getname()[0] or p.stem
+        except Exception:
+            pass
+        return family, str(p.parent)
     return font, None
 
 
@@ -82,17 +93,39 @@ def render_ass(
     hook: str = "",
     cta: str = "",
 ) -> tuple[Path, str | None]:
-    """从已有词级时间戳渲染 ASS（A/B 多版本可复用同一份 words，只换 hook/cta）。"""
+    """从词级时间戳渲染原生风格 ASS（A/B 多版本复用同一份 words，只换 hook/cta）。
+
+    设计对标 TikTok/Reels 真实爆款字幕：
+    - 正文：Montserrat 粗体、白字+黑描边+柔和阴影、短句(2~3词)逐句弹入(pop-in)、下三分之一；
+    - 钩子：纯白粗体大字+厚黑描边(无彩色色块)，上三分之一，前 ~2.6s；
+    - CTA：左下角 TikTok 红圆角按钮样式(模拟原生购物按钮)，结尾 ~4.5s 弹入。
+    尺寸/边距按分辨率自适应(基准 720x1280)。
+    """
     sub = cfg.get("subtitles", default={}) or {}
     chunks = _chunk(words, int(sub.get("max_words", 3)))
 
-    font_name, fontsdir = _font_setup(sub.get("font", "DejaVu Sans"))
-    size = int(sub.get("font_size", 64))
-    primary = sub.get("primary_color", "&H00FFFFFF")
-    outline = "&H00000000"
-    margin_v = int(sub.get("margin_v", 320))
+    font_name, fontsdir = _font_setup(sub.get("font", "assets/fonts/Montserrat-Bold.ttf"))
     w, h = cfg.width, cfg.height
-    big = int(size * 1.25)
+    sf = w / 720.0   # 横向缩放因子
+    hf = h / 1280.0  # 纵向缩放因子
+
+    cap_sz = int(sub.get("font_size", round(54 * sf)))
+    cap_out = max(2, round(3 * sf))
+    cap_sh = max(1, round(1 * sf))
+    cap_mv = int(sub.get("margin_v", round(300 * hf)))
+    primary = sub.get("primary_color", "&H00FFFFFF")
+    black = "&H00000000"
+    shadow = "&H96000000"
+
+    hook_sz = round(60 * sf)
+    hook_out = max(2, round(4 * sf))
+    hook_mv = round(250 * hf)
+
+    cta_sz = round(40 * sf)
+    cta_pad = max(4, round(8 * sf))
+    cta_ml = round(44 * sf)
+    cta_mv = round(150 * hf)
+    cta_red = "&H00552CFE"  # TikTok 红 #FE2C55 (ASS 为 BGR)
 
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -103,28 +136,32 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
-Style: Caps,{font_name},{size},{primary},{outline},&H64000000,1,0,1,4,1,2,60,60,{margin_v}
-Style: Hook,{font_name},{big},&H0000FFFF,{outline},&H64000000,1,0,1,5,1,8,60,60,260
-Style: Cta,{font_name},{big},&H00FFFFFF,{outline},&H64000000,1,0,1,5,2,5,60,60,0
+Style: Caps,{font_name},{cap_sz},{primary},{black},{shadow},1,0,1,{cap_out},{cap_sh},2,70,70,{cap_mv}
+Style: Hook,{font_name},{hook_sz},{primary},{black},{shadow},1,0,1,{hook_out},2,8,80,80,{hook_mv}
+Style: Cta,{font_name},{cta_sz},{primary},{cta_red},&H00000000,1,0,3,{cta_pad},0,1,{cta_ml},70,{cta_mv}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    cap_tag = r"{\fad(70,50)\fscx84\fscy84\t(0,120,\fscx100\fscy100)}"
+    hook_tag = r"{\fad(60,140)\fscx88\fscy88\t(0,150,\fscx100\fscy100)}"
+    cta_tag = r"{\fad(160,0)\fscx92\fscy92\t(0,150,\fscx100\fscy100)}"
+
     lines = [header]
     for c in chunks:
         lines.append(
             f"Dialogue: 0,{_fmt_ts(c.start)},{_fmt_ts(c.end)},Caps,,0,0,0,,"
-            f"{{\\fad(60,60)}}{_esc(c.text)}"
+            f"{cap_tag}{_esc(c.text)}"
         )
     if hook:
         lines.append(
-            f"Dialogue: 1,{_fmt_ts(0)},{_fmt_ts(min(3.0, max(total, 0.1)))},Hook,,0,0,0,,"
-            f"{{\\fad(0,150)}}{_esc(hook)}"
+            f"Dialogue: 1,{_fmt_ts(0)},{_fmt_ts(min(2.6, max(total, 0.1)))},Hook,,0,0,0,,"
+            f"{hook_tag}{_esc(hook)}"
         )
     if cta and total > 1:
         lines.append(
-            f"Dialogue: 1,{_fmt_ts(max(total - 4, 0))},{_fmt_ts(total)},Cta,,0,0,0,,"
-            f"{{\\fad(150,0)}}{_esc(cta)}"
+            f"Dialogue: 1,{_fmt_ts(max(total - 4.5, 0))},{_fmt_ts(total)},Cta,,0,0,0,,"
+            f"{cta_tag}{_esc(cta)}"
         )
     out_ass.parent.mkdir(parents=True, exist_ok=True)
     out_ass.write_text("\n".join(lines) + "\n", encoding="utf-8")
