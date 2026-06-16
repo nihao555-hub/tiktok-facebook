@@ -28,9 +28,16 @@ Hard rules for image_prompt:
   candid, real-world textures. NEVER say illustration / 3D / render / cartoon / poster.
 - The brand's actual product or factory (from the reference photos) MUST appear and stay
   consistent. No on-image text, no watermark, no logo overlay.
+- FACES: by default DO NOT show any person's full frontal face. Frame people from behind,
+  over-the-shoulder, side profile, or show only their hands / torso / lower body. Set
+  "show_face": false on these scenes. Only when a real human face is truly essential
+  (e.g. the founder talking straight to camera) set "show_face": true AND describe that
+  frontal face explicitly in the image_prompt.
 Hard rules for motion_prompt:
 - Subtle, realistic camera or subject motion for a 5-10s clip
   (slow push-in, hand picks up the product, pan across the line, parallax). Keep it natural.
+- Keep it brand-safe: calm, ordinary, professional actions only. No violence, no danger,
+  no blades cutting toward people, nothing a video model's safety filter would reject.
 
 Creative freedom (IMPORTANT): you are the director — be original and avoid homogenized,
 templated ad copy. Pick whatever hook angle fits THIS product/audience best (POV, bold
@@ -55,6 +62,7 @@ Return STRICT JSON only, matching this schema:
      "narration": "spoken voiceover line",
      "on_screen_text": "big caption",
      "ref_images": ["file names from the provided reference list, or omit"],
+     "show_face": false,
      "seconds": 5}
   ]
 }
@@ -96,6 +104,110 @@ def _persona_prompt(template: str) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
+# --------------------------------------------------------------------------
+# 第 0 步：买家画像 / 策略（LLM 先当买家画像专家 + 创意总监 思考，再写脚本）
+# --------------------------------------------------------------------------
+_STRATEGY_SYSTEM = """You are a world-class buyer-persona researcher, creative director and
+performance-marketing strategist for TikTok / Facebook video ads. Before any script exists,
+you think hard about WHO we are selling to and HOW a native viral video would hook them.
+
+Think like the buyer first, then like the director. For a FACTORY (B2B) video the buyer is an
+importer / wholesaler / sourcing agent / brand owner looking for a manufacturer; for a PRODUCT
+(B2C) video the buyer is an end consumer. Ground everything in the target market's real
+culture, buying psychology and the way THAT platform's viral videos in this niche actually look.
+
+Return STRICT JSON only (no markdown), matching:
+{
+  "market": "target market / country",
+  "buyer_persona": {"who": "", "role": "", "context": "where/when they watch & decide"},
+  "biggest_pain": "the #1 fear / frustration / risk that keeps them from buying",
+  "desires": ["what they really want"],
+  "objections": ["doubts we must neutralize on camera"],
+  "decisive_trigger": "the single thing that makes them DM / click / inquire",
+  "hook_angle": "the ONE strongest opening angle for this audience",
+  "emotional_drivers": ["emotions to pull"],
+  "proof_to_show": ["concrete on-screen proof: numbers, certs, capacity, demos, before/after"],
+  "native_format_notes": "how real viral videos in this niche/market look & sound",
+  "recommended_template": "the viral structure id that best fits",
+  "do_not": ["homogenized / cringe / over-polished traps to avoid"]
+}"""
+
+
+def _strategy_user_prompt(cfg: TaskConfig) -> str:
+    brief = cfg.get("brief", default={}) or {}
+    btype = "B2B factory sourcing" if cfg.template == "factory" else "B2C product"
+    return (
+        f"Persona & format guide:\n{_persona_prompt(cfg.template)}\n\n"
+        f"Video type: {cfg.template} ({btype}).\n"
+        f"{_lang_directive(cfg)}\n\n"
+        f"Available viral structures (pick the best id for recommended_template):\n"
+        f"{templates.menu(cfg.template)}\n\n"
+        f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
+        "Develop the buyer-persona & creative strategy as JSON now."
+    )
+
+
+def _strategy_fallback(cfg: TaskConfig) -> dict:
+    is_factory = cfg.template == "factory"
+    return {
+        "market": cfg.language,
+        "buyer_persona": {
+            "who": "importer / wholesaler sourcing a manufacturer" if is_factory
+            else "everyday online shopper",
+            "role": "sourcing / purchasing" if is_factory else "consumer",
+            "context": "scrolling TikTok/FB on a phone",
+        },
+        "biggest_pain": "fear of unreliable suppliers / wasted money" if is_factory
+        else "a daily annoyance the product fixes",
+        "desires": ["trust", "good price", "proof it works"],
+        "objections": ["is this real?", "can I trust them?"],
+        "decisive_trigger": "clear proof + low-friction CTA",
+        "hook_angle": "direct-from-factory, no middleman" if is_factory
+        else "POV of the pain then the fix",
+        "emotional_drivers": ["trust", "relief", "FOMO"],
+        "proof_to_show": ["capacity", "QC", "certifications", "export countries"] if is_factory
+        else ["before/after", "reviews", "units sold"],
+        "native_format_notes": "raw, candid, creator-style, not a polished commercial",
+        "recommended_template": "factory_tour" if is_factory else "pas",
+        "do_not": ["canned ad lines", "over-polished look"],
+    }
+
+
+def generate_strategy(cfg: TaskConfig, secrets: Secrets) -> dict:
+    """先让 LLM 当买家画像专家/创意总监想清楚策略，再用它指导写脚本。"""
+    if not secrets.llm_api_key:
+        return _strategy_fallback(cfg)
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=secrets.llm_api_key, base_url=secrets.llm_base_url or None, timeout=120.0
+    )
+    messages = [
+        {"role": "system", "content": _STRATEGY_SYSTEM},
+        {"role": "user", "content": _strategy_user_prompt(cfg)},
+    ]
+    for attempt in range(1, 4):
+        try:
+            try:
+                resp = client.chat.completions.create(
+                    model=secrets.llm_model, messages=messages, temperature=0.8,
+                    response_format={"type": "json_object"},
+                )
+            except Exception:  # noqa: BLE001
+                resp = client.chat.completions.create(
+                    model=secrets.llm_model, messages=messages, temperature=0.8,
+                )
+            data = _parse_json(resp.choices[0].message.content or "{}")
+            if data.get("buyer_persona") or data.get("hook_angle"):
+                return data
+            raise ValueError("策略 JSON 缺字段")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[llm] 策略生成第 {attempt}/3 次失败: {exc}", flush=True)
+            if attempt < 3:
+                time.sleep(2 * attempt)
+    return _strategy_fallback(cfg)
+
+
 def _available_refs() -> list[str]:
     d = REPO_ROOT / "media" / "refs"
     if not d.exists():
@@ -120,7 +232,7 @@ def _structure_directive(cfg: TaskConfig) -> str:
     )
 
 
-def _user_prompt(cfg: TaskConfig) -> str:
+def _user_prompt(cfg: TaskConfig, strategy: dict | None = None) -> str:
     brief = cfg.get("brief", default={}) or {}
     n = int(cfg.get("clipgen", "scene_count", default=5))
     refs = _available_refs()
@@ -129,8 +241,16 @@ def _user_prompt(cfg: TaskConfig) -> str:
         if refs else
         "No reference photos provided yet; write image_prompt to stand alone.\n"
     )
+    strategy_block = ""
+    if strategy:
+        strategy_block = (
+            "Buyer-persona & creative strategy YOU already developed (the script MUST execute "
+            "it — hit the biggest_pain, use the hook_angle, show the proof_to_show, avoid the "
+            f"do_not traps):\n{json.dumps(strategy, ensure_ascii=False)}\n\n"
+        )
     return (
         f"Persona & format guide:\n{_persona_prompt(cfg.template)}\n\n"
+        f"{strategy_block}"
         f"Template: {cfg.template}\n{_lang_directive(cfg)}\n\n"
         f"{_structure_directive(cfg)}\n\n"
         f"Target total length: ~{cfg.target_seconds}s across {n} scenes.\n"
@@ -208,7 +328,8 @@ def _template_fallback(cfg: TaskConfig) -> Script:
                   scenes=scenes, template_used=used)
 
 
-def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3) -> Script:
+def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3,
+              strategy: dict | None = None) -> Script:
     from openai import OpenAI
 
     client = OpenAI(
@@ -216,7 +337,7 @@ def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3) -> Script:
     )
     messages = [
         {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": _user_prompt(cfg)},
+        {"role": "user", "content": _user_prompt(cfg, strategy)},
     ]
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -247,7 +368,8 @@ def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3) -> Script:
     raise RuntimeError(f"LLM 连续 {retries} 次调用失败") from last_exc
 
 
-def generate_script(cfg: TaskConfig, secrets: Secrets) -> Script:
+def generate_script(cfg: TaskConfig, secrets: Secrets,
+                    strategy: dict | None = None) -> Script:
     if not secrets.llm_api_key:
         return _template_fallback(cfg)
-    return _call_llm(cfg, secrets)
+    return _call_llm(cfg, secrets, strategy=strategy)

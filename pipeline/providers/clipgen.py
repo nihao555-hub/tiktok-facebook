@@ -14,7 +14,10 @@ provider:
 from __future__ import annotations
 
 import math
+import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -26,6 +29,45 @@ from . import imagegen
 
 _VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 _IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+
+# 多线程并发出图/出视频时，保证控制台进度逐行打印不串行
+_LOG_LOCK = threading.Lock()
+
+
+def _log(msg: str) -> None:
+    with _LOG_LOCK:
+        print(msg, flush=True)
+
+
+# 视频模型安全过滤容易误杀的词；软化重试时去掉它们
+_RISKY = (
+    "knife", "blade", "cut", "slice", "chop", "blood", "wound", "gun", "weapon",
+    "fight", "punch", "kick", "fire", "flame", "burn", "explos", "spark", "weld",
+    "molten", "danger", "accident", "injur", "child", "children", "kid", "baby",
+    "smoke", "drug", "alcohol", "knives",
+)
+
+
+def _soften_prompt(prompt: str, level: int) -> str:
+    """level1：去掉敏感词 + 追加安全说明；level2：换成最通用安全推近。"""
+    if level >= 2:
+        return ("slow, gentle cinematic push-in with subtle natural parallax; calm, steady, "
+                "professional and brand-safe; ordinary everyday scene, nothing sensitive")
+    words = [w for w in prompt.split() if w.strip(".,").lower() not in _RISKY]
+    base = " ".join(words).strip() or "slow gentle push-in"
+    return base + ". Calm, safe, professional, brand-safe; no sensitive or dangerous content."
+
+
+def _kenburns(src: Path, dst: Path, w: int, h: int, seconds: float, fps: int) -> None:
+    """视频生成被安全过滤拒绝时的兜底：在 gpt-image-2 静帧上做缓慢推近，避免整条流水线崩。"""
+    frames = max(1, int(round(seconds * fps)))
+    vf = (
+        f"scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase,crop={w * 2}:{h * 2},"
+        f"zoompan=z='min(1.0+0.0016*on,1.14)':d={frames}:"
+        f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={w}x{h}:fps={fps},setsar=1"
+    )
+    ff.run(["-loop", "1", "-i", str(src), "-vf", vf, "-t", f"{seconds}",
+            "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)])
 
 
 def _scale_crop(src: Path, dst: Path, w: int, h: int, seconds: float, fps: int,
@@ -176,18 +218,23 @@ def _wuyin_submit(prompt: str, image_url: str, w: int, h: int,
 
 
 def _wuyin_poll(task_id: str, secrets: Secrets,
-                timeout: float = 600, interval: float = 10) -> str:
+                timeout: float = 600, interval: float = 10,
+                on_poll: Callable[[int], None] | None = None) -> str:
     base = secrets.wuyin_base_url.rstrip("/")
     url = f"{base}/api/async/detail"
     headers = {"Authorization": secrets.wuyin_api_key, "Content-Type": "application/json"}
     deadline = time.time() + timeout
+    polls = 0
     while time.time() < deadline:
         time.sleep(interval)
+        polls += 1
         r = requests.get(url, params={"key": secrets.wuyin_api_key, "id": task_id},
                          headers=headers, timeout=30)
         r.raise_for_status()
         data = r.json().get("data") or {}
         status = data.get("status")
+        if on_poll:
+            on_poll(polls)
         if status == 2:
             results = data.get("result") or []
             if results:
@@ -198,8 +245,36 @@ def _wuyin_poll(task_id: str, secrets: Secrets,
     raise RuntimeError("wuyinkeji 轮询超时")
 
 
+def _animate_scene(s: Scene, image_url: str, want: int, w: int, h: int,
+                   secrets: Secrets, n: int) -> str:
+    """提交无垠图生视频；被安全过滤拒绝时自动软化重试。返回视频 URL（全部失败则抛错）。"""
+    attempts = [
+        (s.mov_prompt, "原始运镜"),
+        (_soften_prompt(s.mov_prompt, 1), "软化运镜(去敏感词)"),
+        (_soften_prompt(s.mov_prompt, 2), "通用安全推近"),
+    ]
+    last_exc: Exception | None = None
+    for prompt, label in attempts:
+        try:
+            task_id = _wuyin_submit(prompt, image_url, w, h, want, secrets)
+            _log(f"  [视频 {s.index + 1}/{n}] 已提交（{label}），轮询中…")
+            return _wuyin_poll(
+                task_id, secrets,
+                on_poll=lambda p: _log(f"  [视频 {s.index + 1}/{n}] 渲染中…(第 {p} 次轮询)"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            _log(f"  [视频 {s.index + 1}/{n}] {label} 失败：{exc}")
+    raise RuntimeError(str(last_exc))
+
+
 def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
                        workdir: Path, w: int, h: int, fps: int) -> list[Path]:
+    """每个分镜一个 worker：gpt-image-2 出图 -> 无垠图生视频 -> 抹角标 -> 定长。
+
+    所有分镜并发跑（A 镜出视频的同时 B 镜还能在出图）。单镜被安全过滤拒绝会自动软化重试，
+    仍失败则回退静帧推近，绝不让一个分镜拖垮整条流水线。
+    """
     if not secrets.grsai_api_key:
         raise RuntimeError("wuyinkeji 链路需要 GRSAI_API_KEY（先用 gpt-image-2 出图）")
     if not secrets.wuyin_api_key:
@@ -208,22 +283,42 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
     vid_seconds = int(cfg.get("clipgen", "video_seconds", default=10))
     img_dir = workdir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
-    out: list[Path] = []
-    for s in script.scenes:
+    scenes = script.scenes
+    n = len(scenes)
+    concurrency = int(cfg.get("clipgen", "concurrency", default=0)) or n
+    concurrency = max(1, min(concurrency, n, 6))
+
+    def _one(s: Scene) -> tuple[int, Path]:
         img_path = img_dir / f"scene_{s.index:02d}.png"
-        refs = _resolve_refs(s)
-        img = imagegen.generate_image(
-            s.img_prompt, img_path, secrets, width=w, height=h, ref_images=refs)
-        want = max(vid_seconds, int(math.ceil(s.seconds)))
-        task_id = _wuyin_submit(s.mov_prompt, img.url, w, h, want, secrets)
-        video_url = _wuyin_poll(task_id, secrets)
-        raw = workdir / f"raw_{s.index:02d}.mp4"
-        _download(video_url, raw)
         dst = workdir / f"scene_{s.index:02d}.mp4"
-        delogo = _wm_delogo_box(raw) if strip_wm else None
-        _scale_crop(raw, dst, w, h, s.seconds, fps, delogo=delogo)
-        out.append(dst)
-    return out
+        _log(f"  [图 {s.index + 1}/{n}] gpt-image-2 出图中…（show_face={s.show_face}）")
+        img = imagegen.generate_image(
+            s.img_prompt, img_path, secrets, width=w, height=h,
+            ref_images=_resolve_refs(s), avoid_frontal_face=not s.show_face,
+            progress=lambda p: _log(f"  [图 {s.index + 1}/{n}] 出图 {p}"))
+        _log(f"  [图 {s.index + 1}/{n}] 出图完成 -> 进入图生视频")
+        want = max(vid_seconds, int(math.ceil(s.seconds)))
+        try:
+            video_url = _animate_scene(s, img.url, want, w, h, secrets, n)
+            raw = workdir / f"raw_{s.index:02d}.mp4"
+            _download(video_url, raw)
+            delogo = _wm_delogo_box(raw) if strip_wm else None
+            _scale_crop(raw, dst, w, h, s.seconds, fps, delogo=delogo)
+            _log(f"  [视频 {s.index + 1}/{n}] 完成 -> {dst.name}")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"  [视频 {s.index + 1}/{n}] 图生视频多次失败，回退静帧缓慢推近：{exc}")
+            _kenburns(img.path, dst, w, h, s.seconds, fps)
+            _log(f"  [视频 {s.index + 1}/{n}] 兜底完成 -> {dst.name}")
+        return s.index, dst
+
+    _log(f"  并发出图/出视频：{n} 个分镜，并发度={concurrency}")
+    results: dict[int, Path] = {}
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = [ex.submit(_one, s) for s in scenes]
+        for f in as_completed(futs):
+            idx, dst = f.result()
+            results[idx] = dst
+    return [results[s.index] for s in scenes]
 
 
 # --------------------------------------------------------------------------

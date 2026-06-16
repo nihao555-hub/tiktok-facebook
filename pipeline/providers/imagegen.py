@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,13 @@ REALISM_SUFFIX = (
     "candid photojournalistic look, true-to-life colors, high detail, photographic depth of field. "
     "Absolutely no text, no watermark, no logo overlay, no captions. "
     "Not an illustration, not a 3D render, not CGI, not cartoon — looks like a real photo."
+)
+
+# 默认不出人正脸（也能显著降低视频模型的安全过滤误杀）
+NO_FACE_SUFFIX = (
+    " Do NOT show any person's full frontal face: keep people turned away from camera "
+    "(back of head, over-the-shoulder, side profile), or show only hands / torso / lower body, "
+    "or frame so the face is out of shot. No identifiable face looking at the camera."
 )
 
 
@@ -53,8 +61,10 @@ def _encode_ref(ref: str) -> str | None:
 
 
 def _poll(base: str, headers: dict[str, str], task_id: str,
-          timeout: float = 360, interval: float = 6) -> str:
+          timeout: float = 600, interval: float = 6,
+          progress: Callable[[str], None] | None = None) -> str:
     deadline = time.time() + timeout
+    last_pct = -1
     while time.time() < deadline:
         time.sleep(interval)
         r = requests.post(f"{base}/v1/draw/result", json={"id": task_id},
@@ -62,6 +72,11 @@ def _poll(base: str, headers: dict[str, str], task_id: str,
         r.raise_for_status()
         data = r.json().get("data") or {}
         status = data.get("status")
+        if progress and status == "running":
+            pct = int(data.get("progress") or 0)
+            if pct != last_pct:
+                progress(f"{pct}%")
+                last_pct = pct
         if status == "succeeded":
             results = data.get("results") or []
             if results and results[0].get("url"):
@@ -93,8 +108,13 @@ def generate_image(
     height: int = 1024,
     ref_images: list[str] | None = None,
     realism: bool = True,
+    avoid_frontal_face: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> ImageResult:
-    """生成一张图片并下载到本地，返回本地路径 + grsai 托管 URL。"""
+    """生成一张图片并下载到本地，返回本地路径 + grsai 托管 URL。
+
+    avoid_frontal_face=True 时追加"不出正脸"约束（show_face 的分镜应传 False）。
+    """
     if not secrets.grsai_api_key:
         raise RuntimeError("缺少 GRSAI_API_KEY（gpt-image-2）")
     base = secrets.grsai_base_url.rstrip("/")
@@ -108,9 +128,14 @@ def generate_image(
         if enc:
             urls.append(enc)
 
+    full_prompt = prompt
+    if avoid_frontal_face:
+        full_prompt += NO_FACE_SUFFIX
+    if realism:
+        full_prompt += REALISM_SUFFIX
     payload: dict = {
         "model": secrets.image_model,
-        "prompt": prompt + (REALISM_SUFFIX if realism else ""),
+        "prompt": full_prompt,
         "aspectRatio": _aspect_for(width, height),
         "quality": "high",
         "webHook": "-1",
@@ -126,6 +151,6 @@ def generate_image(
     task_id = (body.get("data") or {}).get("id")
     if not task_id:
         raise RuntimeError(f"gpt-image-2 提交失败: {body}")
-    remote_url = _poll(base, headers, task_id)
+    remote_url = _poll(base, headers, task_id, progress=progress)
     _download(remote_url, out_path)
     return ImageResult(path=out_path, url=remote_url)

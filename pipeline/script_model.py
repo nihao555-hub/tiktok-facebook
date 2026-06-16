@@ -17,6 +17,7 @@ class Scene:
     image_prompt: str = ""      # 喂 gpt-image-2 的静帧提示（超写实）
     motion_prompt: str = ""     # 喂视频生成的运镜/动作提示
     ref_images: list[str] = field(default_factory=list)  # 该分镜要用的真实素材文件名(media/refs/)
+    show_face: bool = False     # 默认不出人正脸；仅在提示词确需正脸时由 LLM 置 True
 
     @property
     def img_prompt(self) -> str:

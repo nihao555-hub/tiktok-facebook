@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import ffmpeg_utils as ff
@@ -26,14 +28,26 @@ from .script_model import Script
 
 
 def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Path):
-    """配音(决定每个分镜时长) -> 生成片段 -> 拼接底片 -> 抽人声 -> 转写。"""
+    """配音(决定每个分镜时长，并发) -> 生成片段(并发) -> 拼接底片 -> 抽人声 -> 转写。"""
     audio_dir = work / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
-    audio_paths: list[Path] = []
-    narr_durs: list[float] = []
-    for s in script.scenes:
+    scenes = script.scenes
+    n = len(scenes)
+
+    def _tts_one(s) -> tuple[int, Path, float]:
         ap = tts.synth(s.narration, audio_dir / f"a_{s.index:02d}", cfg, secrets)
         dur = ff.duration(ap)
+        print(f"  [配音 {s.index + 1}/{n}] 完成 {dur:.1f}s", flush=True)
+        return s.index, ap, dur
+
+    by_idx: dict[int, tuple[Path, float]] = {}
+    with ThreadPoolExecutor(max_workers=min(n, 4)) as ex:
+        for idx, ap, dur in ex.map(_tts_one, scenes):
+            by_idx[idx] = (ap, dur)
+    audio_paths: list[Path] = []
+    narr_durs: list[float] = []
+    for s in scenes:
+        ap, dur = by_idx[s.index]
         s.seconds = round(max(2.0, dur + 0.4), 3)
         audio_paths.append(ap)
         narr_durs.append(dur)
@@ -72,16 +86,43 @@ def _render_variant(base: Path, words, total, cfg, out: Path, work: Path,
     return mixer.render_final(base, ass, fontsdir, cfg, out, bgm_override=bgm_override)
 
 
+def _print_strategy(strategy: dict) -> None:
+    bp = strategy.get("buyer_persona") or {}
+    print("[0/5] 买家画像 & 策略（gpt-5.5 先当买家画像专家/创意总监思考）：", flush=True)
+    print(f"    🎯 买家：{bp.get('who', '')}（{bp.get('role', '')}）| 市场：{strategy.get('market', '')}")
+    print(f"    😣 最大痛点：{strategy.get('biggest_pain', '')}")
+    print(f"    🪝 钩子角度：{strategy.get('hook_angle', '')}")
+    print(f"    ✅ 要展示的硬证据：{strategy.get('proof_to_show', [])}")
+    print(f"    📲 促成行动：{strategy.get('decisive_trigger', '')}")
+    print(f"    🧩 建议结构：{strategy.get('recommended_template', '')}", flush=True)
+
+
+def _print_script(script: Script) -> None:
+    print(f"    —— gpt-5.5 脚本（hook=\"{script.hook}\" / cta=\"{script.cta}\"）——", flush=True)
+    for s in script.scenes:
+        face = "🙂正脸" if s.show_face else "🚫不出正脸"
+        print(f"    #{s.index + 1} [{face}] 大字:{s.on_screen_text}", flush=True)
+        print(f"        口播: {s.narration}", flush=True)
+        print(f"        图: {s.img_prompt[:90]}", flush=True)
+        print(f"        运镜: {s.mov_prompt[:70]}", flush=True)
+
+
 def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool) -> list[Path]:
     work = outdir / "_work"
     work.mkdir(parents=True, exist_ok=True)
 
-    script = llm.generate_script(cfg, secrets)
+    strategy = llm.generate_strategy(cfg, secrets)
+    (outdir / "strategy.json").write_text(
+        json.dumps(strategy, ensure_ascii=False, indent=2), encoding="utf-8")
+    _print_strategy(strategy)
+
+    script = llm.generate_script(cfg, secrets, strategy=strategy)
     (outdir / "script.json").write_text(script.to_json(), encoding="utf-8")
     tpl = templates.get(script.template_used)
     tpl_name = tpl["name_zh"] if tpl else (script.template_used or "auto")
     print(f"[1/5] 脚本就绪：{len(script.scenes)} 个分镜，"
-          f"爆款结构=[{script.template_used or 'auto'}]{tpl_name}，hook=\"{script.hook}\"")
+          f"爆款结构=[{script.template_used or 'auto'}]{tpl_name}，hook=\"{script.hook}\"", flush=True)
+    _print_script(script)
 
     base, voice, words = _prepare_assets(script, cfg, secrets, work)
     total = ff.duration(base)
