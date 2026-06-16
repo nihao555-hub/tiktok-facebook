@@ -84,8 +84,11 @@ def _scale_crop(src: Path, dst: Path, w: int, h: int, seconds: float, fps: int,
         ff.run(["-loop", "1", "-t", f"{seconds}", "-i", str(src),
                 "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)])
     else:
-        ff.run(["-stream_loop", "-1", "-t", f"{seconds}", "-i", str(src),
-                "-an", "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)])
+        # -t 必须放在 -i 之后做输出时长限制；放输入侧配合 -stream_loop -1 时
+        # 时间戳每次循环重置，导致永不终止（ffmpeg 卡死）。
+        ff.run(["-stream_loop", "-1", "-i", str(src),
+                "-an", "-vf", vf, "-t", f"{seconds}",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)])
 
 
 def _wm_delogo_box(raw: Path) -> str | None:

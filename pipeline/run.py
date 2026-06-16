@@ -40,8 +40,10 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
         print(f"  [配音 {s.index + 1}/{n}] 完成 {dur:.1f}s", flush=True)
         return s.index, ap, dur
 
+    # ElevenLabs 低层套餐并发上限低，限 2；EdgeTTS 等免费接口可放宽
+    tts_workers = 2 if (secrets.tts_provider or "edge").lower() == "elevenlabs" else 4
     by_idx: dict[int, tuple[Path, float]] = {}
-    with ThreadPoolExecutor(max_workers=min(n, 4)) as ex:
+    with ThreadPoolExecutor(max_workers=min(n, tts_workers)) as ex:
         for idx, ap, dur in ex.map(_tts_one, scenes):
             by_idx[idx] = (ap, dur)
     audio_paths: list[Path] = []

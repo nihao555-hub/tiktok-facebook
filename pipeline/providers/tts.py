@@ -11,6 +11,7 @@ provider:
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from ..config import Secrets, TaskConfig
@@ -62,20 +63,25 @@ def _elevenlabs(text: str, out_path: Path, secrets: Secrets) -> Path:
 
     voice = secrets.tts_voice or "21m00Tcm4TlvDq8ikWAM"
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
-    r = requests.post(
-        url,
-        headers={"xi-api-key": secrets.tts_api_key, "accept": "audio/mpeg"},
-        json={
-            "text": text,
-            "model_id": secrets.tts_model or "eleven_multilingual_v2",
-            "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "style": 0.3},
-        },
-        timeout=120,
-    )
-    r.raise_for_status()
-    mp3 = out_path.with_suffix(".mp3")
-    mp3.write_bytes(r.content)
-    return mp3
+    payload = {
+        "text": text,
+        "model_id": secrets.tts_model or "eleven_multilingual_v2",
+        "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "style": 0.3},
+    }
+    headers = {"xi-api-key": secrets.tts_api_key, "accept": "audio/mpeg"}
+    last: Exception | None = None
+    for attempt in range(1, 7):
+        r = requests.post(url, headers=headers, json=payload, timeout=120)
+        if r.status_code in (429, 500, 502, 503, 504):
+            wait = float(r.headers.get("retry-after") or 0) or min(2 ** attempt, 30)
+            last = RuntimeError(f"ElevenLabs {r.status_code}")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        mp3 = out_path.with_suffix(".mp3")
+        mp3.write_bytes(r.content)
+        return mp3
+    raise RuntimeError(f"ElevenLabs 多次限流/失败: {last}")
 
 
 def _azure(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets) -> Path:
