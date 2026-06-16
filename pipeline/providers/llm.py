@@ -166,6 +166,7 @@ def _strategy_user_prompt(cfg: TaskConfig) -> str:
         f"{focus_block}"
         f"Available viral structures (pick the best id for recommended_template):\n"
         f"{templates.menu(cfg.template)}\n\n"
+        f"{templates.hook_bank()}\n\n"
         f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
         "Develop the buyer-persona & creative strategy as JSON now."
     )
@@ -280,6 +281,7 @@ def _user_prompt(cfg: TaskConfig, strategy: dict | None = None) -> str:
         f"Template: {cfg.template}\n{_lang_directive(cfg)}\n\n"
         f"{focus_block}"
         f"{_structure_directive(cfg)}\n\n"
+        f"{templates.hook_bank()}\n\n"
         f"Target total length: ~{cfg.target_seconds}s across {n} scenes.\n"
         f"{refs_line}"
         f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
