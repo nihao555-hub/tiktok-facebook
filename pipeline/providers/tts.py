@@ -81,7 +81,30 @@ def _edge(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets) -> Path:
         await comm.save(str(mp3))
 
     asyncio.run(_go())
+    _trim_silence(mp3)
     return mp3
+
+
+def _trim_silence(mp3: Path) -> None:
+    """裁掉配音首尾静音。
+
+    EdgeTTS 输出常带 0.2~0.4s 尾部静音，混剪时每镜结尾就会出现明显空档(听感上像“卡住”)。
+    裁掉后分镜时长贴着真实语速、字幕与音频也更一致。阈值取保守值，过度裁剪则保留原文件。
+    """
+    from .. import ffmpeg_utils as ff
+
+    tmp = mp3.with_suffix(".trim.mp3")
+    one = "silenceremove=start_periods=1:start_silence=0.05:start_threshold=-50dB:detection=peak"
+    af = f"{one},areverse,{one},areverse"
+    try:
+        ff.run(["-i", str(mp3), "-af", af, "-c:a", "libmp3lame", "-q:a", "3", str(tmp)])
+    except RuntimeError:
+        tmp.unlink(missing_ok=True)
+        return
+    if tmp.exists() and tmp.stat().st_size > 256 and ff.duration(tmp) >= 0.3:
+        tmp.replace(mp3)
+    else:
+        tmp.unlink(missing_ok=True)
 
 
 def _openai(text: str, out_path: Path, secrets: Secrets) -> Path:

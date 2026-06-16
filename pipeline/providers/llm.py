@@ -115,7 +115,21 @@ def _focus_directive(cfg: TaskConfig) -> str:
         "the PRODUCTS being made, on the real shop floor. NO lifestyle/home/street scenes, NO abstract or "
         "decorative shots, NO talking-head-only scenes. image_prompt must name the specific workstation, "
         "machine and product so the buyer sees genuine production capability and wants to source / partner. "
-        "Match the structure/pace of viral factory-tour clips on TikTok/Facebook in this niche."
+        "Match the structure/pace of viral factory-tour clips on TikTok/Facebook in this niche.\n"
+        "PROVE THE OUTPUT (HARD REQUIREMENT): the buyer only DMs when they SEE how good the result is, so "
+        "most scenes must be (a) tight CLOSE-UPS of the core process actually happening on the product "
+        "(the tool/beam/machine working on the material, in macro detail) and (b) HERO close-ups of the "
+        "FINISHED products — show the sharpness, precision, texture and finish quality, plus a wall / "
+        "batch / many-SKU spread of finished pieces. Open on the single most visually impressive process "
+        "or finished-result shot. Spend far less time on slogans and more on this visible 'effect evidence'. "
+        "For a LASER engraving / marking factory specifically: scenes should center on the laser beam "
+        "engraving/marking in macro (sparks, the mark forming line by line) across DIFFERENT materials "
+        "(stainless steel, aluminum, acrylic, wood, leather) and razor-sharp close-ups of the engraved "
+        "finished pieces — make a buyer think 'their quality is insane, I want to order'.\n"
+        "NARRATION STYLE: write each scene's narration as ONE short, natural spoken sentence that plainly "
+        "tells the sourcing buyer what they are seeing and the capability it proves (concrete, not vague "
+        "slogans). Keep all scenes a similar narration length so pacing is even — never one long monologue "
+        "scene and one near-empty scene."
     )
 
 

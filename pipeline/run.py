@@ -55,7 +55,9 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
     narr_durs: list[float] = []
     for s in scenes:
         ap, dur = by_idx[s.index]
-        s.seconds = round(max(2.0, dur + 0.4), 3)
+        # 先声后画：分镜时长贴着该句配音的真实长度(配音已裁首尾静音)，只留很小的尾部留白，
+        # 避免每镜结尾出现明显空档(听感上像“卡住”)。
+        s.seconds = round(max(1.5, dur + 0.18), 3)
         audio_paths.append(ap)
         narr_durs.append(dur)
 

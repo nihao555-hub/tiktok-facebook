@@ -262,6 +262,31 @@ def _esc(text: str) -> str:
     return text.replace("\n", " ").replace("{", "(").replace("}", ")").strip()
 
 
+def _wrap_ass(text: str, max_chars: int) -> str:
+    """把整句折成多行(ASS 的 \\N)，每行 <= max_chars 个字素簇；数字/英文不切散。
+
+    用于无空格语言(泰/中)的“整句字幕”：保持整句在同一时间块内显示(与配音逐字一致)，
+    只在视觉上换行，绝不切成多个不同时间的小块(那会与真实语速错位、两种语言也对不上)。
+    """
+    atoms = _atoms((text or "").strip())
+    out: list[str] = []
+    cur = ""
+    cur_len = 0
+    for a in atoms:
+        al = _clen(a)
+        if cur and a.strip() and cur_len + al > max_chars:
+            out.append(cur)
+            cur = ""
+            cur_len = 0
+        if not cur and not a.strip():
+            continue
+        cur += a
+        cur_len += al
+    if cur:
+        out.append(cur)
+    return r"\N".join(_esc(x) for x in out)
+
+
 def _chunk_secondary(
     words: list[tuple[float, float, str]], max_chars: int, nospace: bool, max_words: int
 ) -> list[Chunk]:
@@ -324,10 +349,6 @@ def render_ass(
     """
     sub = cfg.get("subtitles", default={}) or {}
     nospace = _is_nospace(cfg.language)
-    if nospace:
-        chunks = _chunk_nospace(words, int(sub.get("max_chars", 16)))
-    else:
-        chunks = _chunk(words, int(sub.get("max_words", 3)))
 
     font_name, fontsdir = _font_setup(sub.get("font", "assets/fonts/Montserrat-Bold.ttf"))
     w, h = cfg.width, cfg.height
@@ -335,27 +356,27 @@ def render_ass(
     hf = h / 1280.0  # 纵向缩放因子
 
     white = "&H00FFFFFF"
+    black = "&H00000000"
     accent = sub.get("accent_color", "&H0000E5FF")    # 卡拉OK高亮(默认亮黄, ASS 为 BGR)
-    box = sub.get("box_color", "&H59000000")           # 字幕半透明黑底(药丸)
-    box_hook = "&H40000000"                             # 钩子底色(更透)
-    shadow_c = "&H64000000"
+    shadow_c = "&H64000000"                             # 柔和阴影(半透明黑)
     cta_red = sub.get("cta_color", "&H00552CFE")        # TikTok 红 #FE2C55 (BGR)
     ko_group = max(1, int(sub.get("karaoke_chars", 2)))
 
+    # 不再用半透明黑底色块(原 BorderStyle=3)：改为粗描边+柔和阴影(BorderStyle=1)，字幕融入画面
     cap_sz = int(sub.get("font_size", round(52 * sf)))
-    cap_pad = max(3, round(8 * sf))     # BorderStyle=3 时 Outline 充当药丸内边距
-    cap_sh = max(1, round(2 * sf))
+    cap_out = max(3, round(3.6 * sf))   # 正文描边粗细
+    cap_sh = max(1, round(1.6 * sf))    # 柔和阴影
     cap_mv = int(sub.get("margin_v", round(300 * hf)))
 
     # 第二语言（中泰双语：中文辅助字幕）——更小、贴在主字幕正下方
     sub2_font_name = sub.get("secondary_font", "WenQuanYi Zen Hei")  # 中文需 CJK 字体
     sub2_lang = (sub.get("secondary_lang", "zh") or "zh").strip().lower()
     sub2_sz = int(sub.get("secondary_font_size", round(33 * sf)))
-    sub2_pad = max(2, round(6 * sf))
+    sub2_out = max(2, round(2.6 * sf))
     sub2_mv = max(round(60 * hf), cap_mv - round((cap_sz + 26) * hf))
 
     hook_sz = round(58 * sf)
-    hook_pad = max(4, round(11 * sf))
+    hook_out = max(3, round(4 * sf))
     hook_mv = round(248 * hf)
 
     cta_sz = round(40 * sf)
@@ -378,9 +399,9 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 {fmt}
-Style: Caps,{font_name},{cap_sz},{accent},{white},{box},{shadow_c},1,0,0,0,100,100,0,0,3,{cap_pad},{cap_sh},2,60,60,{cap_mv},1
-Style: Sub2,{sub2_font_name},{sub2_sz},{white},{white},{box},{shadow_c},0,0,0,0,100,100,0,0,3,{sub2_pad},{cap_sh},2,60,60,{sub2_mv},1
-Style: Hook,{font_name},{hook_sz},{white},{white},{box_hook},{shadow_c},1,0,0,0,100,100,0,0,3,{hook_pad},{cap_sh},8,70,70,{hook_mv},1
+Style: Caps,{font_name},{cap_sz},{white},{accent},{black},{shadow_c},1,0,0,0,100,100,0,0,1,{cap_out},{cap_sh},2,60,60,{cap_mv},1
+Style: Sub2,{sub2_font_name},{sub2_sz},{white},{white},{black},{shadow_c},0,0,0,0,100,100,0,0,1,{sub2_out},{cap_sh},2,60,60,{sub2_mv},1
+Style: Hook,{font_name},{hook_sz},{white},{white},{black},{shadow_c},1,0,0,0,100,100,0,0,1,{hook_out},{cap_sh},8,70,70,{hook_mv},1
 Style: Cta,{font_name},{cta_sz},{white},{white},{cta_red},&H00000000,1,0,0,0,100,100,0,0,3,{cta_pad},0,2,{cta_ml},60,{cta_mv},1
 
 [Events]
@@ -391,32 +412,58 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     hook_anim = r"{\fad(60,140)\fscx88\fscy88\t(0,150,\fscx100\fscy100)}"
     cta_anim = r"{\fad(150,0)\fscx80\fscy80\t(0,170,\fscx108\fscy108)\t(170,340,\fscx100\fscy100)}"
 
+    # 主字幕事件：
+    #  - 无空格语言(泰/中)：每个分镜=一条完整旁白句，整句按该句配音的真实时长显示(与口播逐字一致)，
+    #    只折行不另切时间块——避免按平均时间硬切导致与语速错位、且与中文行对不上。
+    #  - 有空格语言(英文等)：whisper 给了真实词级时间戳，仍按短句+逐词卡拉OK高亮。
+    max_chars = int(sub.get("max_chars", 16))
+    max_chars2 = int(sub.get("max_chars_secondary", 18))
+    nospace2 = _is_nospace(sub2_lang)
+    # 中泰双语且两种语言都无空格(泰+中)：把泰文(大)与中文(小)渲染成同一个 Dialogue 事件——
+    # 泰文在上、中文在下，永远同进同出、同一句意思、绝不上下重叠错位(中文用内联 CJK 字体+更小字号)。
+    paired = bool(words2) and nospace and nospace2
+    zh_by_start: dict[float, str] = {}
+    if paired:
+        for s, _e, t in words2:
+            zh_by_start[round(s, 3)] = t
+
+    prim_events: list[tuple[float, float, str]] = []
+    if nospace:
+        for s, e, t in words:
+            body = _wrap_ass(t, max_chars)
+            if paired:
+                zh = _wrap_ass(zh_by_start.get(round(s, 3), ""), max_chars2)
+                if zh:
+                    body = (
+                        f"{body}\\N{{\\fn{sub2_font_name}\\fs{sub2_sz}\\b0\\bord{sub2_out}}}{zh}"
+                    )
+            prim_events.append((s, e, body))
+    else:
+        for c in _chunk(words, int(sub.get("max_words", 3))):
+            units = _karaoke_units(c, False, ko_group)
+            body = "".join(f"{{\\k{cs}}}{_esc(t)} " for cs, t in units).rstrip()
+            prim_events.append((c.start, c.end, body))
+
     lines = [header]
-    sep = "" if nospace else " "
-    for c in chunks:
-        units = _karaoke_units(c, nospace, ko_group)
-        body = "".join(f"{{\\k{cs}}}{_esc(t)}{sep}" for cs, t in units).rstrip()
+    for s, e, body in prim_events:
         if not body:
             continue
-        lines.append(
-            f"Dialogue: 0,{_fmt_ts(c.start)},{_fmt_ts(c.end)},Caps,,0,0,0,,{cap_anim}{body}"
-        )
-    # 第二语言（中泰双语：中文辅助字幕，主字幕正下方一行，逐镜与泰文同步）
-    if words2:
-        nospace2 = _is_nospace(sub2_lang)
-        chunks2 = _chunk_secondary(
-            words2,
-            int(sub.get("max_chars_secondary", 18)),
-            nospace2,
-            int(sub.get("max_words_secondary", 6)),
-        )
-        for c in chunks2:
-            txt = _esc(c.text)
+        lines.append(f"Dialogue: 0,{_fmt_ts(s)},{_fmt_ts(e)},Caps,,0,0,0,,{cap_anim}{body}")
+    # 第二语言：仅在“非配对”(例如英文等有空格语言，时间轴与泰文不能逐镜配对)时单独渲染一行辅助字幕。
+    if words2 and not paired:
+        sec_events: list[tuple[float, float, str]] = []
+        if nospace2:
+            for s, e, t in words2:
+                sec_events.append((s, e, _wrap_ass(t, max_chars2)))
+        else:
+            for c in _chunk_secondary(
+                words2, max_chars2, nospace2, int(sub.get("max_words_secondary", 6))
+            ):
+                sec_events.append((c.start, c.end, _esc(c.text)))
+        for s, e, txt in sec_events:
             if not txt:
                 continue
-            lines.append(
-                f"Dialogue: 0,{_fmt_ts(c.start)},{_fmt_ts(c.end)},Sub2,,0,0,0,,{sub2_anim}{txt}"
-            )
+            lines.append(f"Dialogue: 0,{_fmt_ts(s)},{_fmt_ts(e)},Sub2,,0,0,0,,{sub2_anim}{txt}")
     if hook:
         lines.append(
             f"Dialogue: 1,{_fmt_ts(0)},{_fmt_ts(min(2.6, max(total, 0.1)))},Hook,,0,0,0,,"
