@@ -60,12 +60,16 @@ def _openai(text: str, out_path: Path, secrets: Secrets) -> Path:
 def _elevenlabs(text: str, out_path: Path, secrets: Secrets) -> Path:
     import requests
 
-    voice = secrets.tts_voice or "Rachel"
+    voice = secrets.tts_voice or "21m00Tcm4TlvDq8ikWAM"
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
     r = requests.post(
         url,
         headers={"xi-api-key": secrets.tts_api_key, "accept": "audio/mpeg"},
-        json={"text": text, "model_id": "eleven_multilingual_v2"},
+        json={
+            "text": text,
+            "model_id": secrets.tts_model or "eleven_multilingual_v2",
+            "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "style": 0.3},
+        },
         timeout=120,
     )
     r.raise_for_status()

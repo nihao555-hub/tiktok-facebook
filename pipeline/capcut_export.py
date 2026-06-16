@@ -31,15 +31,23 @@ def export(script: Script, cfg: TaskConfig, work: Path, draft_dir: Path) -> Path
     s.add_track(TrackType.audio)
     s.add_track(TrackType.text)
 
+    def _cap(path: Path, target: float) -> float:
+        """把片段时长夹到不超过素材真实时长（留 50ms 余量，避开 µs 取整溢出）。"""
+        mat = ff.duration(path)
+        if mat <= 0:
+            return target
+        return round(min(target, mat - 0.05), 3)
+
     t = 0.0
     for scene in script.scenes:
         vid = work / "clips" / f"scene_{scene.index:02d}.mp4"
         aud = work / "audio" / f"a_{scene.index:02d}.mp3"
         dur = float(scene.seconds)
         if vid.exists():
-            s.add_segment(VideoSegment(VideoMaterial(str(vid)), trange(f"{t}s", f"{dur}s")))
+            vdur = _cap(vid, dur)
+            s.add_segment(VideoSegment(VideoMaterial(str(vid)), trange(f"{t}s", f"{vdur}s")))
         if aud.exists():
-            adur = min(ff.duration(aud), dur) or dur
+            adur = _cap(aud, dur)
             s.add_segment(AudioSegment(AudioMaterial(str(aud)), trange(f"{t}s", f"{adur}s")))
         if scene.on_screen_text:
             s.add_segment(TextSegment(scene.on_screen_text, trange(f"{t}s", f"{min(dur, 3.0)}s")))

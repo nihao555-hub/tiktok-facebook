@@ -11,9 +11,11 @@ venv/
 # media & outputs (大文件不进库；保留目录占位)
 media/clips/*
 media/bgm/*
+media/refs/*
 output/*
 !media/clips/.gitkeep
 !media/bgm/.gitkeep
+!media/refs/.gitkeep
 !output/.gitkeep
 
 # whisper model cache

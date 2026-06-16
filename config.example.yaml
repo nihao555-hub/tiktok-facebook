@@ -21,10 +21,13 @@ brief:
   target_market: "US office workers / remote workers"
   cta: "Tap the cart 🛒 limited 30% off"
 
-# AI 片段生成（每个分镜一段）。provider=local 时改为读取 media/clips 下的素材
+# AI 片段生成（每个分镜一段）。
+# CLIPGEN_PROVIDER=wuyinkeji 时：gpt-image-2 出超写实图(吃 media/refs 真实素材) -> 无垠把图动起来
+# CLIPGEN_PROVIDER=local 时：读取 media/clips 下的素材（无则合成占位）
 clipgen:
   scene_count: 5
   seconds_per_scene: 5
+  video_seconds: 10        # 在线视频生成每段时长（混剪阶段会按配音裁到精确长度）
 
 # 配音
 tts:
@@ -49,6 +52,7 @@ decorate:
   logo: ""                 # 品牌水印 png，留空=不加
   progress_bar: true       # 顶部进度条
   cta_sticker: true        # 结尾 CTA 贴纸（用 brief.cta 文本）
+  strip_ai_watermark: true # 裁掉 AI 视频右下角角标水印（看不出 AI）
 
 # 批量 A/B 多版本（投流测素材）：会按下面的组合各产一条
 variants:

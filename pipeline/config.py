@@ -25,13 +25,26 @@ class Secrets:
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
 
+    # 文生图/图生图 (grsai gpt-image-2)
+    image_provider: str = "grsai"
+    grsai_api_key: str = ""
+    grsai_base_url: str = "https://grsaiapi.com"
+    image_model: str = "gpt-image-2"
+
+    # AI 片段生成 (local | wuyinkeji | replicate | kling | openai_video | runway)
     clipgen_provider: str = "local"
     clipgen_api_key: str = ""
     clipgen_base_url: str = ""
     clipgen_model: str = ""
 
+    # 文生视频/图生视频 (wuyinkeji)
+    wuyin_api_key: str = ""
+    wuyin_base_url: str = "https://api.wuyinkeji.com"
+    wuyin_endpoint: str = "video_google_omni"
+
     tts_provider: str = "edge"
     tts_voice: str = "en-US-AriaNeural"
+    tts_model: str = "eleven_multilingual_v2"
     tts_api_key: str = ""
     tts_base_url: str = ""
     azure_tts_region: str = ""
@@ -50,12 +63,20 @@ class Secrets:
             llm_api_key=_env("LLM_API_KEY"),
             llm_base_url=_env("LLM_BASE_URL", "https://api.openai.com/v1"),
             llm_model=_env("LLM_MODEL", "gpt-4o-mini"),
+            image_provider=_env("IMAGE_PROVIDER", "grsai"),
+            grsai_api_key=_env("GRSAI_API_KEY") or _env("LLM_API_KEY"),
+            grsai_base_url=_env("GRSAI_BASE_URL", "https://grsaiapi.com"),
+            image_model=_env("IMAGE_MODEL", "gpt-image-2"),
             clipgen_provider=_env("CLIPGEN_PROVIDER", "local"),
             clipgen_api_key=_env("CLIPGEN_API_KEY"),
             clipgen_base_url=_env("CLIPGEN_BASE_URL"),
             clipgen_model=_env("CLIPGEN_MODEL"),
+            wuyin_api_key=_env("WUYIN_API_KEY"),
+            wuyin_base_url=_env("WUYIN_BASE_URL", "https://api.wuyinkeji.com"),
+            wuyin_endpoint=_env("WUYIN_ENDPOINT", "video_google_omni"),
             tts_provider=_env("TTS_PROVIDER", "edge"),
             tts_voice=_env("TTS_VOICE", "en-US-AriaNeural"),
+            tts_model=_env("TTS_MODEL", "eleven_multilingual_v2"),
             tts_api_key=_env("TTS_API_KEY"),
             tts_base_url=_env("TTS_BASE_URL"),
             azure_tts_region=_env("AZURE_TTS_REGION"),
