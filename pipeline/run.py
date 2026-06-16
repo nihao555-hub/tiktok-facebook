@@ -1,0 +1,157 @@
+"""流水线编排 CLI。
+
+用法:
+    python -m pipeline.run --config config.yaml
+    python -m pipeline.run --config config.yaml --no-capcut   # 不导出剪映草稿
+    python -m pipeline.run --config config.yaml --publish     # 强制按 config 发布
+
+产物默认在 output/<project>/ 下：
+    final.mp4              主成片
+    variant_*.mp4          A/B 多版本
+    script.json            脚本
+    capcut_draft/          可在剪映/CapCut 打开继续精修的草稿
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+from pathlib import Path
+
+from . import ffmpeg_utils as ff
+from . import mixer, subtitles
+from .config import REPO_ROOT, Secrets, TaskConfig
+from .providers import clipgen, llm, tts
+from .script_model import Script
+
+
+def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Path):
+    """配音(决定每个分镜时长) -> 生成片段 -> 拼接底片 -> 抽人声 -> 转写。"""
+    audio_dir = work / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_paths: list[Path] = []
+    for s in script.scenes:
+        ap = tts.synth(s.narration, audio_dir / f"a_{s.index:02d}", cfg, secrets)
+        dur = ff.duration(ap)
+        s.seconds = round(max(2.0, dur + 0.4), 3)
+        audio_paths.append(ap)
+
+    video_paths = clipgen.generate_clips(script, cfg, secrets, work / "clips")
+    base = mixer.assemble(script, video_paths, audio_paths, cfg, work)
+    voice = mixer.extract_voiceover(base, work)
+
+    words: list[tuple[float, float, str]] = []
+    if cfg.get("subtitles", "enabled", default=True):
+        sub = cfg.get("subtitles", default={}) or {}
+        words = subtitles.transcribe_words(voice, sub.get("whisper_model", "small"), cfg.language)
+    return base, voice, words
+
+
+def _render_variant(base: Path, words, total, cfg, out: Path, work: Path,
+                    hook: str, cta: str, bgm_override: str | None) -> Path:
+    fontsdir = None
+    ass = None
+    if cfg.get("subtitles", "enabled", default=True):
+        ass_path = work / f"{out.stem}.ass"
+        ass, fontsdir = subtitles.render_ass(words, total, cfg, ass_path, hook=hook, cta=cta)
+    if ass is None:
+        # 没字幕也要能出片：用一个空 ASS
+        ass_path = work / f"{out.stem}.ass"
+        ass_path.write_text(
+            "[Script Info]\nScriptType: v4.00+\n[V4+ Styles]\n[Events]\n", encoding="utf-8"
+        )
+        ass = ass_path
+    return mixer.render_final(base, ass, fontsdir, cfg, out, bgm_override=bgm_override)
+
+
+def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool) -> list[Path]:
+    work = outdir / "_work"
+    work.mkdir(parents=True, exist_ok=True)
+
+    script = llm.generate_script(cfg, secrets)
+    (outdir / "script.json").write_text(script.to_json(), encoding="utf-8")
+    print(f"[1/5] 脚本就绪：{len(script.scenes)} 个分镜，hook=\"{script.hook}\"")
+
+    base, voice, words = _prepare_assets(script, cfg, secrets, work)
+    total = ff.duration(base)
+    print(f"[2/5] 底片+配音就绪：{total:.1f}s")
+
+    results: list[Path] = []
+    final = _render_variant(base, words, total, cfg, outdir / "final.mp4", work,
+                            hook=script.hook, cta=script.cta, bgm_override=None)
+    results.append(final)
+    print(f"[3/5] 主成片：{final}")
+
+    # A/B 多版本（换 hook / 换 bgm）
+    hooks = cfg.get("variants", "hooks", default=[]) or []
+    bgms = cfg.get("variants", "bgms", default=[]) or []
+    vi = 0
+    for hk in hooks:
+        vi += 1
+        out = outdir / f"variant_{vi:02d}_hook.mp4"
+        _render_variant(base, words, total, cfg, out, work, hook=hk, cta=script.cta, bgm_override=None)
+        results.append(out)
+    for bg in bgms:
+        vi += 1
+        out = outdir / f"variant_{vi:02d}_bgm.mp4"
+        _render_variant(base, words, total, cfg, out, work, hook=script.hook, cta=script.cta, bgm_override=bg)
+        results.append(out)
+    if vi:
+        print(f"[4/5] A/B 多版本：{vi} 条")
+
+    if do_capcut:
+        try:
+            from . import capcut_export
+
+            draft_dir = outdir / "capcut_draft"
+            capcut_export.export(script, cfg, work, draft_dir)
+            print(f"[5/5] 剪映/CapCut 草稿：{draft_dir}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[5/5] 跳过 CapCut 草稿导出：{exc}")
+
+    return results
+
+
+def _publish(cfg: TaskConfig, secrets: Secrets, video: Path) -> None:
+    brief = cfg.get("brief", default={}) or {}
+    caption = (cfg.get("publish", "caption", default="") or "").format(**brief)
+    if cfg.get("publish", "tiktok", default=False):
+        from .publish import tiktok
+
+        print("发布 TikTok:", tiktok.publish(video, caption, secrets.tiktok_access_token))
+    if cfg.get("publish", "facebook", default=False):
+        from .publish import facebook
+
+        print("发布 Facebook:", facebook.publish(
+            video, caption, secrets.fb_page_id, secrets.fb_page_access_token, secrets.fb_api_version
+        ))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="TikTok/Facebook 投流视频流水线")
+    ap.add_argument("--config", default=str(REPO_ROOT / "config.yaml"))
+    ap.add_argument("--no-capcut", action="store_true", help="不导出剪映/CapCut 草稿")
+    ap.add_argument("--publish", action="store_true", help="强制发布（覆盖 config 开关）")
+    args = ap.parse_args()
+
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        cfg_path = REPO_ROOT / "config.example.yaml"
+        print(f"未找到 {args.config}，使用示例配置 {cfg_path.name}")
+    cfg = TaskConfig.load(cfg_path)
+    secrets = Secrets.load()
+
+    outdir = REPO_ROOT / "output" / cfg.project
+    if outdir.exists():
+        shutil.rmtree(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    results = build(cfg, secrets, outdir, do_capcut=not args.no_capcut)
+    print("完成：", *[str(p) for p in results], sep="\n  ")
+
+    if args.publish or cfg.get("publish", "tiktok", default=False) or cfg.get("publish", "facebook", default=False):
+        _publish(cfg, secrets, results[0])
+
+
+if __name__ == "__main__":
+    main()

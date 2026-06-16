@@ -1,0 +1,64 @@
+# 一个投流视频任务的配置。复制为 config.yaml 或用 --config 指定。
+# 两条业务线对应 prompts/factory_persona.md 与 prompts/product_persona.md
+
+project: "demo"
+template: product          # factory | product
+language: en               # 文案/配音语言
+
+video:
+  width: 1080
+  height: 1920             # 9:16 竖屏 (TikTok/Reels 原生)
+  fps: 30
+  target_seconds: 24       # 期望成片时长
+
+# 选题/产品信息（喂给 LLM 写脚本）
+brief:
+  product_name: "Adjustable Laptop Stand"
+  selling_points:
+    - "saves your neck & posture"
+    - "folds flat, fits any bag"
+    - "aluminum, holds up to 10kg"
+  target_market: "US office workers / remote workers"
+  cta: "Tap the cart 🛒 limited 30% off"
+
+# AI 片段生成（每个分镜一段）。provider=local 时改为读取 media/clips 下的素材
+clipgen:
+  scene_count: 5
+  seconds_per_scene: 5
+
+# 配音
+tts:
+  rate: "+8%"              # 语速
+  volume: "+0%"
+
+# 字幕（卡拉OK逐字高亮，平台原生感）
+subtitles:
+  enabled: true
+  whisper_model: small     # tiny|base|small|medium  （越大越准越慢）
+  font: "DejaVu Sans"      # 字体名；也可填 assets/fonts/xxx.ttf 路径
+  font_size: 64
+  max_words: 3             # 每屏最多几个词（TikTok 逐词/短句风格）
+  primary_color: "&H00FFFFFF"     # 白
+  highlight_color: "&H0000FFFF"   # 黄 (高亮)
+  margin_v: 320
+
+# 平台原生装饰
+decorate:
+  bgm: ""                  # 留空=不加；填 media/bgm/xxx.mp3
+  bgm_volume: 0.18
+  logo: ""                 # 品牌水印 png，留空=不加
+  progress_bar: true       # 顶部进度条
+  cta_sticker: true        # 结尾 CTA 贴纸（用 brief.cta 文本）
+
+# 批量 A/B 多版本（投流测素材）：会按下面的组合各产一条
+variants:
+  hooks:                   # 覆盖前 3 秒钩子文案，每个生成一版
+    - "POV: your neck hurts every single day 😩"
+    - "I wish I knew this 1 year ago..."
+  bgms: []                 # 可放多个 bgm 路径，各生成一版
+
+# 发布
+publish:
+  tiktok: false
+  facebook: false
+  caption: "{product_name} — link in bio 🔗 #tiktokmademebuyit #gadgets"

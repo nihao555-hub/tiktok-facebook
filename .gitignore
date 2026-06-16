@@ -1,0 +1,20 @@
+# secrets
+.env
+config.yaml
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# media & outputs (大文件不进库；保留目录占位)
+media/clips/*
+media/bgm/*
+output/*
+!media/clips/.gitkeep
+!media/bgm/.gitkeep
+!output/.gitkeep
+
+# whisper model cache
+*.bin

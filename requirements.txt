@@ -1,0 +1,17 @@
+# Core pipeline
+pyyaml>=6.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+Pillow>=10.0.0
+
+# 配音 (TTS) - edge-tts is the zero-key default; others are optional providers
+edge-tts>=6.1.0
+
+# 字幕 (ASR for word-level timing -> karaoke captions)
+faster-whisper>=1.0.0
+
+# 文案 (LLM) - OpenAI-compatible client works with OpenAI / DeepSeek / 通义 / Gemini(OpenAI-compat) etc.
+openai>=1.30.0
+
+# 原生可编辑草稿导出 (剪映 / CapCut)
+pyJianYingDraft>=0.2.6
