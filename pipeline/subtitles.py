@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,11 +40,49 @@ def transcribe_words(audio: Path, model_size: str, language: str) -> list[tuple[
     )
     words: list[tuple[float, float, str]] = []
     for seg in segments:
-        for w in (seg.words or []):
+        seg_words = seg.words or []
+        got = False
+        for w in seg_words:
             txt = (w.word or "").strip()
             if txt:
                 words.append((float(w.start), float(w.end), txt))
+                got = True
+        # 泰语/中文等无空格语言常拿不到词级时间戳，退化为整句时间戳，后面再按字数切分
+        if not got:
+            txt = (seg.text or "").strip()
+            if txt:
+                words.append((float(seg.start), float(seg.end), txt))
     return words
+
+
+# 无空格分词的语言（泰/中/日/老挝/高棉/缅甸）：字幕按字数切分、不插空格
+_NOSPACE_LANGS = {"th", "zh", "ja", "lo", "km", "my"}
+
+
+def is_nospace(language: str) -> bool:
+    return (language or "").strip().lower()[:2] in _NOSPACE_LANGS
+
+
+# 兼容内部旧名
+_is_nospace = is_nospace
+
+
+def words_from_script(scenes, narr_durs: list[float]) -> list[tuple[float, float, str]]:
+    """无空格语言(泰/中/日)：直接用脚本里写好的旁白做字幕，按分镜时长定位。
+
+    避免 whisper 转写无空格语言时出错导致字幕乱码——我们已经知道每句台词的准确文本，
+    只需把它放到对应分镜的音频时间段里，后续 `_chunk_nospace` 会按字数切成短句弹入。
+    """
+    out: list[tuple[float, float, str]] = []
+    t = 0.0
+    for s, dur in zip(scenes, narr_durs):
+        text = (s.narration or "").strip()
+        seconds = float(s.seconds or dur)
+        if text:
+            span = max(min(float(dur), seconds), 0.3)
+            out.append((t, t + span, text))
+        t += seconds
+    return out
 
 
 def _chunk(words: list[tuple[float, float, str]], max_words: int) -> list[Chunk]:
@@ -57,6 +96,42 @@ def _chunk(words: list[tuple[float, float, str]], max_words: int) -> list[Chunk]
             buf = []
     if buf:
         chunks.append(Chunk(buf[0][0], buf[-1][1], " ".join(x[2] for x in buf)))
+    return chunks
+
+
+def _split_long(words: list[tuple[float, float, str]], max_chars: int) -> list[tuple[float, float, str]]:
+    """把过长的 token（常见于整句时间戳）按字数等分，并线性插值时间。"""
+    out: list[tuple[float, float, str]] = []
+    for s, e, t in words:
+        t = t.replace(" ", "")
+        if len(t) <= max_chars:
+            if t:
+                out.append((s, e, t))
+            continue
+        n = max(1, math.ceil(len(t) / max_chars))
+        step = (e - s) / n
+        for i in range(n):
+            piece = t[i * max_chars:(i + 1) * max_chars]
+            if piece:
+                out.append((s + i * step, s + (i + 1) * step, piece))
+    return out
+
+
+def _chunk_nospace(words: list[tuple[float, float, str]], max_chars: int) -> list[Chunk]:
+    """泰/中/日等无空格语言：按字数聚合成短句、字间不插空格（否则字幕会断成豆腐块）。"""
+    toks = _split_long(words, max_chars)
+    chunks: list[Chunk] = []
+    buf: list[tuple[float, float, str]] = []
+    cnt = 0
+    for s, e, t in toks:
+        buf.append((s, e, t))
+        cnt += len(t)
+        if cnt >= max_chars:
+            chunks.append(Chunk(buf[0][0], buf[-1][1], "".join(x[2] for x in buf)))
+            buf = []
+            cnt = 0
+    if buf:
+        chunks.append(Chunk(buf[0][0], buf[-1][1], "".join(x[2] for x in buf)))
     return chunks
 
 
@@ -102,7 +177,10 @@ def render_ass(
     尺寸/边距按分辨率自适应(基准 720x1280)。
     """
     sub = cfg.get("subtitles", default={}) or {}
-    chunks = _chunk(words, int(sub.get("max_words", 3)))
+    if _is_nospace(cfg.language):
+        chunks = _chunk_nospace(words, int(sub.get("max_chars", 16)))
+    else:
+        chunks = _chunk(words, int(sub.get("max_words", 3)))
 
     font_name, fontsdir = _font_setup(sub.get("font", "assets/fonts/Montserrat-Bold.ttf"))
     w, h = cfg.width, cfg.height

@@ -31,6 +31,12 @@ Hard rules for motion_prompt:
 - Subtle, realistic camera or subject motion for a 5-10s clip
   (slow push-in, hand picks up the product, pan across the line, parallax). Keep it natural.
 
+Creative freedom (IMPORTANT): you are the director — be original and avoid homogenized,
+templated ad copy. Pick whatever hook angle fits THIS product/audience best (POV, bold
+question, shocking number, before/after, mini-story, myth-busting, "things I wish I knew").
+Vary pacing, scene ideas and wording every time. It must feel like a native organic clip a
+real creator posted, NOT a polished commercial. Do not say the word "ad".
+
 Return STRICT JSON only, matching this schema:
 {
   "hook": "first 3s on-screen text (scroll-stopper)",
@@ -46,6 +52,35 @@ Return STRICT JSON only, matching this schema:
   ]
 }
 No markdown, no commentary."""
+
+
+_LANG_NAMES = {
+    "th": "Thai (ภาษาไทย)",
+    "en": "English",
+    "zh": "Chinese",
+    "id": "Indonesian",
+    "vi": "Vietnamese",
+    "ms": "Malay",
+}
+
+
+def _lang_directive(cfg: TaskConfig) -> str:
+    code = (cfg.language or "en").strip().lower()
+    name = _LANG_NAMES.get(code[:2], cfg.language or "English")
+    out = (
+        f"LANGUAGE: Write hook, cta, narration and on_screen_text in {name}. "
+        "Keep image_prompt and motion_prompt in ENGLISH — they are technical prompts that "
+        "drive the image/video models, not shown to viewers."
+    )
+    if code.startswith("th"):
+        out += (
+            " Localize FULLY for a Thai audience: write natural spoken Thai (never "
+            "translated-sounding), casual TikTok/Reels tone with local particles "
+            "(นะ/เลย/อ่ะ/จัดไป/ดีงาม), Thai cultural context (Thai people, homes, street "
+            "food, weather, prices in ฿), and the way Thai creators actually hook viewers in "
+            "viral product videos. Keep on_screen_text short (a few words) so it fits one line."
+        )
+    return out
 
 
 def _persona_prompt(template: str) -> str:
@@ -72,7 +107,7 @@ def _user_prompt(cfg: TaskConfig) -> str:
     )
     return (
         f"Persona & format guide:\n{_persona_prompt(cfg.template)}\n\n"
-        f"Template: {cfg.template}\nLanguage: {cfg.language}\n"
+        f"Template: {cfg.template}\n{_lang_directive(cfg)}\n"
         f"Target total length: ~{cfg.target_seconds}s across {n} scenes.\n"
         f"{refs_line}"
         f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
@@ -160,12 +195,12 @@ def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3) -> Script:
         try:
             try:
                 resp = client.chat.completions.create(
-                    model=secrets.llm_model, messages=messages, temperature=0.8,
+                    model=secrets.llm_model, messages=messages, temperature=0.9,
                     response_format={"type": "json_object"},
                 )
             except Exception:  # noqa: BLE001 - 部分兼容端不支持 response_format
                 resp = client.chat.completions.create(
-                    model=secrets.llm_model, messages=messages, temperature=0.8,
+                    model=secrets.llm_model, messages=messages, temperature=0.9,
                 )
             data = _parse_json(resp.choices[0].message.content or "{}")
             if not data.get("scenes"):

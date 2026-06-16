@@ -30,11 +30,13 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
     audio_dir = work / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     audio_paths: list[Path] = []
+    narr_durs: list[float] = []
     for s in script.scenes:
         ap = tts.synth(s.narration, audio_dir / f"a_{s.index:02d}", cfg, secrets)
         dur = ff.duration(ap)
         s.seconds = round(max(2.0, dur + 0.4), 3)
         audio_paths.append(ap)
+        narr_durs.append(dur)
 
     video_paths = clipgen.generate_clips(script, cfg, secrets, work / "clips")
     base = mixer.assemble(script, video_paths, audio_paths, cfg, work)
@@ -43,7 +45,13 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
     words: list[tuple[float, float, str]] = []
     if cfg.get("subtitles", "enabled", default=True):
         sub = cfg.get("subtitles", default={}) or {}
-        words = subtitles.transcribe_words(voice, sub.get("whisper_model", "small"), cfg.language)
+        if subtitles.is_nospace(cfg.language):
+            # 泰/中/日等：用脚本原文做字幕（whisper 对无空格语言易转写出错）
+            words = subtitles.words_from_script(script.scenes, narr_durs)
+        else:
+            words = subtitles.transcribe_words(
+                voice, sub.get("whisper_model", "small"), cfg.language
+            )
     return base, voice, words
 
 

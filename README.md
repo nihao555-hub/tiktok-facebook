@@ -17,10 +17,15 @@
 | 文案/分镜脚本 | grsai（OpenAI 兼容） | `gpt-5.5` |
 | 文生图 / 图生图（超写实） | grsai | `gpt-image-2` |
 | 图生视频 / 文生视频 | 无垠科技 wuyinkeji | `video_google_omni` |
-| 配音 TTS | ElevenLabs | `eleven_multilingual_v2` |
+| 配音 TTS | ElevenLabs | `eleven_multilingual_v2`（泰语等非英语用 `eleven_v3`） |
 
 图生图会吃 `media/refs/` 里你的真实商品/工厂图，强约束"100% 真实世界质感、看不出 AI"；
 生成视频右下角的 AI 角标会用 `delogo` 自动抹掉。
+
+**多语言 / 泰语**：`config.yaml` 里设 `language: th`，LLM 会用地道泰语写 hook/旁白/字幕/CTA 并适配泰国文化与 TikTok/FB 爆款结构（image/motion 提示词仍用英文驱动模型）。配套两处：
+>
+> - 配音改 `TTS_MODEL=eleven_v3`（ElevenLabs 唯一支持泰语 `th` 的模型）。
+> - 字幕字体改 `subtitles.font: assets/fonts/Kanit-Bold.ttf`（Montserrat 不含泰文字形会变豆腐块）。泰/中/日等无空格语言按 `subtitles.max_chars` 切分，且直接用脚本原文做字幕（不依赖 whisper，避免无空格语言转写出错）。
 
 > 内容打法（买家画像 / 痛点公式 / 两套分镜脚本模板 / TikTok·FB 原生形式差异）见 [`docs/STRATEGY.md`](docs/STRATEGY.md)。
 > 流水线里 `prompts/factory_persona.md`（工厂展示·B2B）与 `prompts/product_persona.md`（单品带货·B2C）就是这套打法喂给 LLM 的角色提示。
@@ -36,7 +41,7 @@ pipeline/
     imagegen.py       文生图/图生图（grsai gpt-image-2，超写实，吃 media/refs 真实素材）
     clipgen.py        AI 片段生成（wuyinkeji 图生视频默认；local 零key兜底；replicate/kling/... 预留）
     tts.py            配音（elevenlabs 默认；edge 免 key 兜底；openai/azure 可选）
-  subtitles.py        faster-whisper 词级时间戳 → TikTok 风格逐词字幕 + 大钩子 + CTA (ASS)
+  subtitles.py        TikTok 风格逐句字幕 + 大钩子 + CTA (ASS)；英文用 whisper 词级时间戳，泰/中/日用脚本原文按字数切分
   mixer.py            FFmpeg 混剪 + 进度条 + logo + BGM
   capcut_export.py    pyJianYingDraft 导出可编辑剪映/CapCut 草稿
   publish/

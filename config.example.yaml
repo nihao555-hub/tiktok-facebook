@@ -3,7 +3,8 @@
 
 project: "demo"
 template: product          # factory | product
-language: en               # 文案/配音语言
+language: en               # 文案/配音语言 (en|th|zh|id|vi|ms...)
+                           # 注：泰语 th 请配合 TTS_MODEL=eleven_v3 + 泰文字体 Kanit-Bold.ttf
 
 video:
   width: 1080
@@ -38,9 +39,10 @@ tts:
 subtitles:
   enabled: true
   whisper_model: small     # tiny|base|small|medium  （越大越准越慢）
-  font: "assets/fonts/Montserrat-Bold.ttf"  # 原生风格粗体；也可填字体名
+  font: "assets/fonts/Montserrat-Bold.ttf"  # 英文用 Montserrat；泰文用 assets/fonts/Kanit-Bold.ttf
   font_size: 54            # 留空则按分辨率自适应（基准 720x1280）
-  max_words: 3             # 每屏最多几个词（TikTok 逐词/短句风格）
+  max_words: 3             # 有空格语言(英/西等)：每屏最多几个词
+  max_chars: 16            # 无空格语言(泰/中/日)：每屏最多几个字
   primary_color: "&H00FFFFFF"     # 白字 + 黑描边（原生爆款字幕样式）
   margin_v: 300            # 字幕在下三分之一，避开底部 UI 安全区
 
