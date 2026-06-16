@@ -35,6 +35,11 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
     n = len(scenes)
 
     def _tts_one(s) -> tuple[int, Path, float]:
+        existing = (audio_dir / f"a_{s.index:02d}").with_suffix(".mp3")
+        if existing.exists() and existing.stat().st_size > 512:
+            dur = ff.duration(existing)
+            print(f"  [配音 {s.index + 1}/{n}] 复用 {dur:.1f}s", flush=True)
+            return s.index, existing, dur
         ap = tts.synth(s.narration, audio_dir / f"a_{s.index:02d}", cfg, secrets)
         dur = ff.duration(ap)
         print(f"  [配音 {s.index + 1}/{n}] 完成 {dur:.1f}s", flush=True)
@@ -59,6 +64,7 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
     voice = mixer.extract_voiceover(base, work)
 
     words: list[tuple[float, float, str]] = []
+    words2: list[tuple[float, float, str]] = []
     if cfg.get("subtitles", "enabled", default=True):
         sub = cfg.get("subtitles", default={}) or {}
         if subtitles.is_nospace(cfg.language):
@@ -68,16 +74,21 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
             words = subtitles.transcribe_words(
                 voice, sub.get("whisper_model", "small"), cfg.language
             )
-    return base, voice, words
+        # 中泰双语：第二行中文辅助字幕（取脚本里每个分镜的 narration_zh）
+        if sub.get("bilingual", False) and any(s.narration_zh.strip() for s in scenes):
+            words2 = subtitles.words_from_script(script.scenes, narr_durs, field="narration_zh")
+    return base, voice, words, words2
 
 
 def _render_variant(base: Path, words, total, cfg, out: Path, work: Path,
-                    hook: str, cta: str, bgm_override: str | None) -> Path:
+                    hook: str, cta: str, bgm_override: str | None,
+                    words2: list | None = None) -> Path:
     fontsdir = None
     ass = None
     if cfg.get("subtitles", "enabled", default=True):
         ass_path = work / f"{out.stem}.ass"
-        ass, fontsdir = subtitles.render_ass(words, total, cfg, ass_path, hook=hook, cta=cta)
+        ass, fontsdir = subtitles.render_ass(
+            words, total, cfg, ass_path, hook=hook, cta=cta, words2=words2)
     if ass is None:
         # 没字幕也要能出片：用一个空 ASS
         ass_path = work / f"{out.stem}.ass"
@@ -104,35 +115,49 @@ def _print_script(script: Script) -> None:
     for s in script.scenes:
         face = "🙂正脸" if s.show_face else "🚫不出正脸"
         print(f"    #{s.index + 1} [{face}] 大字:{s.on_screen_text}", flush=True)
-        print(f"        口播: {s.narration}", flush=True)
+        print(f"        口播(泰): {s.narration}", flush=True)
+        if s.narration_zh.strip():
+            print(f"        中文译: {s.narration_zh}", flush=True)
         print(f"        图: {s.img_prompt[:90]}", flush=True)
         print(f"        运镜: {s.mov_prompt[:70]}", flush=True)
 
 
-def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool) -> list[Path]:
+def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool,
+          resume: bool = False) -> list[Path]:
     work = outdir / "_work"
     work.mkdir(parents=True, exist_ok=True)
 
-    strategy = llm.generate_strategy(cfg, secrets)
-    (outdir / "strategy.json").write_text(
-        json.dumps(strategy, ensure_ascii=False, indent=2), encoding="utf-8")
-    _print_strategy(strategy)
+    script_path = outdir / "script.json"
+    strategy_path = outdir / "strategy.json"
+    if resume and script_path.exists():
+        strategy = (
+            json.loads(strategy_path.read_text(encoding="utf-8"))
+            if strategy_path.exists() else {}
+        )
+        script = Script.from_dict(json.loads(script_path.read_text(encoding="utf-8")))
+        print("[resume] 复用已有 strategy.json / script.json，不再调用 LLM", flush=True)
+        _print_strategy(strategy)
+    else:
+        strategy = llm.generate_strategy(cfg, secrets)
+        strategy_path.write_text(
+            json.dumps(strategy, ensure_ascii=False, indent=2), encoding="utf-8")
+        _print_strategy(strategy)
 
-    script = llm.generate_script(cfg, secrets, strategy=strategy)
-    (outdir / "script.json").write_text(script.to_json(), encoding="utf-8")
+        script = llm.generate_script(cfg, secrets, strategy=strategy)
+        script_path.write_text(script.to_json(), encoding="utf-8")
     tpl = templates.get(script.template_used)
     tpl_name = tpl["name_zh"] if tpl else (script.template_used or "auto")
     print(f"[1/5] 脚本就绪：{len(script.scenes)} 个分镜，"
           f"爆款结构=[{script.template_used or 'auto'}]{tpl_name}，hook=\"{script.hook}\"", flush=True)
     _print_script(script)
 
-    base, voice, words = _prepare_assets(script, cfg, secrets, work)
+    base, voice, words, words2 = _prepare_assets(script, cfg, secrets, work)
     total = ff.duration(base)
     print(f"[2/5] 底片+配音就绪：{total:.1f}s")
 
     results: list[Path] = []
     final = _render_variant(base, words, total, cfg, outdir / "final.mp4", work,
-                            hook=script.hook, cta=script.cta, bgm_override=None)
+                            hook=script.hook, cta=script.cta, bgm_override=None, words2=words2)
     results.append(final)
     print(f"[3/5] 主成片：{final}")
 
@@ -143,12 +168,12 @@ def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool) -> l
     for hk in hooks:
         vi += 1
         out = outdir / f"variant_{vi:02d}_hook.mp4"
-        _render_variant(base, words, total, cfg, out, work, hook=hk, cta=script.cta, bgm_override=None)
+        _render_variant(base, words, total, cfg, out, work, hook=hk, cta=script.cta, bgm_override=None, words2=words2)
         results.append(out)
     for bg in bgms:
         vi += 1
         out = outdir / f"variant_{vi:02d}_bgm.mp4"
-        _render_variant(base, words, total, cfg, out, work, hook=script.hook, cta=script.cta, bgm_override=bg)
+        _render_variant(base, words, total, cfg, out, work, hook=script.hook, cta=script.cta, bgm_override=bg, words2=words2)
         results.append(out)
     if vi:
         print(f"[4/5] A/B 多版本：{vi} 条")
@@ -185,6 +210,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="TikTok/Facebook 投流视频流水线")
     ap.add_argument("--config", default=str(REPO_ROOT / "config.yaml"))
     ap.add_argument("--no-capcut", action="store_true", help="不导出剪映/CapCut 草稿")
+    ap.add_argument("--resume", action="store_true",
+                    help="复用已有产物（script/clips/audio），只补齐缺失分镜后重新合成")
     ap.add_argument("--publish", action="store_true", help="强制发布（覆盖 config 开关）")
     ap.add_argument("--list-templates", action="store_true",
                     help="列出全部爆款通用接口模版后退出")
@@ -205,11 +232,11 @@ def main() -> None:
     secrets = Secrets.load()
 
     outdir = REPO_ROOT / "output" / cfg.project
-    if outdir.exists():
+    if outdir.exists() and not args.resume:
         shutil.rmtree(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    results = build(cfg, secrets, outdir, do_capcut=not args.no_capcut)
+    results = build(cfg, secrets, outdir, do_capcut=not args.no_capcut, resume=args.resume)
     print("完成：", *[str(p) for p in results], sep="\n  ")
 
     if args.publish or cfg.get("publish", "tiktok", default=False) or cfg.get("publish", "facebook", default=False):

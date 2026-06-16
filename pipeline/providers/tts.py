@@ -17,9 +17,46 @@ from pathlib import Path
 from ..config import Secrets, TaskConfig
 
 
+# 各语言的原生 EdgeTTS 神经音色（真母语发音）。
+# th 男/女声分开列出——ElevenLabs 的 multilingual_v2 配英文音色念泰文是“假泰语/乱码”，
+# 泰语一律走这里的原生泰语音色。
+_EDGE_VOICE_BY_LANG = {
+    "th": "th-TH-PremwadeeNeural",   # 泰语 女声（默认）
+    "th-f": "th-TH-PremwadeeNeural",
+    "th-m": "th-TH-NiwatNeural",     # 泰语 男声
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "en": "en-US-AriaNeural",
+    "id": "id-ID-GadisNeural",
+    "vi": "vi-VN-HoaiMyNeural",
+    "ms": "ms-MY-YasminNeural",
+}
+# ElevenLabs 的 eleven_multilingual_v2 不真正支持的语言——强制改用原生 EdgeTTS。
+_EDGE_ONLY_LANGS = {"th", "lo", "km", "my"}
+
+
+def _edge_voice(cfg: TaskConfig, secrets: Secrets) -> str:
+    """优先 config.yaml 的 tts.voice；否则按目标语言选原生音色；都没有再退回 secrets。"""
+    code = (cfg.language or "en").strip().lower()[:2]
+    cfg_voice = (cfg.get("tts", "voice", default="") or "").strip()
+    if cfg_voice:
+        return cfg_voice
+    configured = (secrets.tts_voice or "").strip()
+    # 已配置且与目标语言一致就沿用；否则按语言挑原生音色（避免英文音色念泰文=乱码）
+    if configured and configured.lower().startswith(code):
+        return configured
+    gender = (cfg.get("tts", "gender", default="") or "").strip().lower()
+    key = f"{code}-{gender[:1]}" if gender and f"{code}-{gender[:1]}" in _EDGE_VOICE_BY_LANG else code
+    return _EDGE_VOICE_BY_LANG.get(key, _EDGE_VOICE_BY_LANG.get(code, configured or "en-US-AriaNeural"))
+
+
 def synth(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     provider = (secrets.tts_provider or "edge").lower()
+    code = (cfg.language or "en").strip().lower()[:2]
+    # 泰语等：ElevenLabs/OpenAI 英文音色会“硬念”成乱码 -> 强制走原生 EdgeTTS 泰语音色
+    if code in _EDGE_ONLY_LANGS and provider in ("elevenlabs", "openai"):
+        print(f"  [TTS] {code} 语言不走 {provider}（会念成乱码），改用原生 EdgeTTS 音色", flush=True)
+        provider = "edge"
     if provider == "edge":
         return _edge(text, out_path, cfg, secrets)
     if provider == "openai":
@@ -36,10 +73,11 @@ def _edge(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets) -> Path:
 
     rate = cfg.get("tts", "rate", default="+0%")
     volume = cfg.get("tts", "volume", default="+0%")
+    voice = _edge_voice(cfg, secrets)
     mp3 = out_path.with_suffix(".mp3")
 
     async def _go() -> None:
-        comm = edge_tts.Communicate(text, secrets.tts_voice, rate=rate, volume=volume)
+        comm = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
         await comm.save(str(mp3))
 
     asyncio.run(_go())

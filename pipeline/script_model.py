@@ -11,7 +11,8 @@ from dataclasses import fields as dataclass_fields
 class Scene:
     index: int = 0
     visual_prompt: str = ""     # 画面描述（无 image/motion 时回退用它）
-    narration: str = ""         # 这段口播文案（用于配音 + 字幕）
+    narration: str = ""         # 这段口播文案（主语言/泰语，用于配音 + 主字幕）
+    narration_zh: str = ""      # 同句中文翻译（中泰双语时作辅助小字幕；不配音）
     on_screen_text: str = ""    # 屏幕大字（钩子/卖点/CTA）
     seconds: float = 5.0
     image_prompt: str = ""      # 喂 gpt-image-2 的静帧提示（超写实）

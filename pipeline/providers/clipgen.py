@@ -70,6 +70,12 @@ def _kenburns(src: Path, dst: Path, w: int, h: int, seconds: float, fps: int) ->
             "-r", str(fps), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)])
 
 
+def _slate(dst: Path, w: int, h: int, seconds: float, fps: int) -> None:
+    """出图与文生视频都失败时的最后兜底：纯色板，保证该分镜仍产出片段、整条流水线不崩。"""
+    ff.run(["-f", "lavfi", "-i", f"color=c=0x1b2230:s={w}x{h}:d={seconds}:r={fps}",
+            "-t", f"{seconds}", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)])
+
+
 def _scale_crop(src: Path, dst: Path, w: int, h: int, seconds: float, fps: int,
                 delogo: str | None = None) -> None:
     """把任意素材缩放裁剪成 WxH 并定长（视频循环/截断，图片做缓慢推近）。
@@ -250,11 +256,16 @@ def _wuyin_poll(task_id: str, secrets: Secrets,
 
 def _animate_scene(s: Scene, image_url: str, want: int, w: int, h: int,
                    secrets: Secrets, n: int) -> str:
-    """提交无垠图生视频；被安全过滤拒绝时自动软化重试。返回视频 URL（全部失败则抛错）。"""
+    """提交无垠视频生成；被安全过滤拒绝时自动软化重试。返回视频 URL（全部失败则抛错）。
+
+    有首帧图时走图生视频（image_url 非空）；首帧出图失败时退化为文生视频，
+    此时把画面描述拼进 prompt，让 Veo 没有首帧也能生成真实工厂镜头。
+    """
+    base = s.mov_prompt if image_url else f"{s.img_prompt}. {s.mov_prompt}".strip()
     attempts = [
-        (s.mov_prompt, "原始运镜"),
-        (_soften_prompt(s.mov_prompt, 1), "软化运镜(去敏感词)"),
-        (_soften_prompt(s.mov_prompt, 2), "通用安全推近"),
+        (base, "原始运镜"),
+        (_soften_prompt(base, 1), "软化运镜(去敏感词)"),
+        (_soften_prompt(base, 2), "通用安全推近"),
     ]
     last_exc: Exception | None = None
     for prompt, label in attempts:
@@ -294,23 +305,40 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
     def _one(s: Scene) -> tuple[int, Path]:
         img_path = img_dir / f"scene_{s.index:02d}.png"
         dst = workdir / f"scene_{s.index:02d}.mp4"
-        _log(f"  [图 {s.index + 1}/{n}] gpt-image-2 出图中…（show_face={s.show_face}）")
-        img = imagegen.generate_image(
-            s.img_prompt, img_path, secrets, width=w, height=h,
-            ref_images=_resolve_refs(s), avoid_frontal_face=not s.show_face,
-            progress=lambda p: _log(f"  [图 {s.index + 1}/{n}] 出图 {p}"))
-        _log(f"  [图 {s.index + 1}/{n}] 出图完成 -> 进入图生视频")
+        # --resume：该分镜已生成过就直接复用，省掉重复出图/出视频的钱和时间
+        if dst.exists() and dst.stat().st_size > 4096:
+            _log(f"  [视频 {s.index + 1}/{n}] 复用已生成片段 -> {dst.name}")
+            return s.index, dst
+        img: imagegen.ImageResult | None = None
+        for attempt in range(2):
+            try:
+                _log(f"  [图 {s.index + 1}/{n}] gpt-image-2 出图中…"
+                     f"（show_face={s.show_face}，第{attempt + 1}次）")
+                img = imagegen.generate_image(
+                    s.img_prompt, img_path, secrets, width=w, height=h,
+                    ref_images=_resolve_refs(s), avoid_frontal_face=not s.show_face,
+                    progress=lambda p: _log(f"  [图 {s.index + 1}/{n}] 出图 {p}"))
+                _log(f"  [图 {s.index + 1}/{n}] 出图完成 -> 进入图生视频")
+                break
+            except Exception as exc:  # noqa: BLE001
+                _log(f"  [图 {s.index + 1}/{n}] 出图失败（第{attempt + 1}次）：{exc}")
+        image_url = img.url if img else ""
+        if not image_url:
+            _log(f"  [图 {s.index + 1}/{n}] 出图最终失败，改用文生视频（无首帧）兜底")
         want = max(vid_seconds, int(math.ceil(s.seconds)))
         try:
-            video_url = _animate_scene(s, img.url, want, w, h, secrets, n)
+            video_url = _animate_scene(s, image_url, want, w, h, secrets, n)
             raw = workdir / f"raw_{s.index:02d}.mp4"
             _download(video_url, raw)
             delogo = _wm_delogo_box(raw) if strip_wm else None
             _scale_crop(raw, dst, w, h, s.seconds, fps, delogo=delogo)
             _log(f"  [视频 {s.index + 1}/{n}] 完成 -> {dst.name}")
         except Exception as exc:  # noqa: BLE001
-            _log(f"  [视频 {s.index + 1}/{n}] 图生视频多次失败，回退静帧缓慢推近：{exc}")
-            _kenburns(img.path, dst, w, h, s.seconds, fps)
+            _log(f"  [视频 {s.index + 1}/{n}] 生视频多次失败，回退兜底：{exc}")
+            if img is not None:
+                _kenburns(img.path, dst, w, h, s.seconds, fps)
+            else:
+                _slate(dst, w, h, s.seconds, fps)
             _log(f"  [视频 {s.index + 1}/{n}] 兜底完成 -> {dst.name}")
         return s.index, dst
 

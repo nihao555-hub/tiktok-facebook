@@ -59,13 +59,17 @@ Return STRICT JSON only, matching this schema:
     {"index": 0,
      "image_prompt": "one photorealistic still to generate",
      "motion_prompt": "subtle camera/subject motion for the clip",
-     "narration": "spoken voiceover line",
+     "narration": "spoken voiceover line (in the target language)",
+     "narration_zh": "an accurate, natural Simplified-Chinese translation of THIS narration",
      "on_screen_text": "big caption",
      "ref_images": ["file names from the provided reference list, or omit"],
      "show_face": false,
      "seconds": 5}
   ]
 }
+narration_zh is REQUIRED on every scene: it must be a faithful, fluent Chinese
+translation of that scene's narration (used for a Chinese helper subtitle line). Do not
+leave it empty and do not just transliterate.
 No markdown, no commentary."""
 
 
@@ -96,6 +100,23 @@ def _lang_directive(cfg: TaskConfig) -> str:
             "viral product videos. Keep on_screen_text short (a few words) so it fits one line."
         )
     return out
+
+
+def _focus_directive(cfg: TaskConfig) -> str:
+    """工厂(B2B)片的硬性聚焦：每个分镜都要是工厂真实作业镜头、集中宣传工厂业务实力。"""
+    if cfg.template != "factory":
+        return ""
+    return (
+        "FACTORY FOCUS (HARD REQUIREMENT): This is a factory-showcase B2B video whose ONLY job is "
+        "to present and sell the factory's MANUFACTURING BUSINESS to sourcing buyers. EVERY single "
+        "scene must show a concrete, REAL factory operation in action — e.g. raw material / loading, "
+        "the core process machine actually running on the product, the production line, in-process & "
+        "final QC/inspection, packing, warehouse stock, container loading / shipping. Show the WORK and "
+        "the PRODUCTS being made, on the real shop floor. NO lifestyle/home/street scenes, NO abstract or "
+        "decorative shots, NO talking-head-only scenes. image_prompt must name the specific workstation, "
+        "machine and product so the buyer sees genuine production capability and wants to source / partner. "
+        "Match the structure/pace of viral factory-tour clips on TikTok/Facebook in this niche."
+    )
 
 
 def _persona_prompt(template: str) -> str:
@@ -136,10 +157,13 @@ Return STRICT JSON only (no markdown), matching:
 def _strategy_user_prompt(cfg: TaskConfig) -> str:
     brief = cfg.get("brief", default={}) or {}
     btype = "B2B factory sourcing" if cfg.template == "factory" else "B2C product"
+    focus = _focus_directive(cfg)
+    focus_block = f"{focus}\n\n" if focus else ""
     return (
         f"Persona & format guide:\n{_persona_prompt(cfg.template)}\n\n"
         f"Video type: {cfg.template} ({btype}).\n"
         f"{_lang_directive(cfg)}\n\n"
+        f"{focus_block}"
         f"Available viral structures (pick the best id for recommended_template):\n"
         f"{templates.menu(cfg.template)}\n\n"
         f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
@@ -248,10 +272,13 @@ def _user_prompt(cfg: TaskConfig, strategy: dict | None = None) -> str:
             "it — hit the biggest_pain, use the hook_angle, show the proof_to_show, avoid the "
             f"do_not traps):\n{json.dumps(strategy, ensure_ascii=False)}\n\n"
         )
+    focus = _focus_directive(cfg)
+    focus_block = f"{focus}\n\n" if focus else ""
     return (
         f"Persona & format guide:\n{_persona_prompt(cfg.template)}\n\n"
         f"{strategy_block}"
         f"Template: {cfg.template}\n{_lang_directive(cfg)}\n\n"
+        f"{focus_block}"
         f"{_structure_directive(cfg)}\n\n"
         f"Target total length: ~{cfg.target_seconds}s across {n} scenes.\n"
         f"{refs_line}"
