@@ -37,6 +37,7 @@ class Script:
     cta: str
     scenes: list[Scene] = field(default_factory=list)
     template_used: str = ""     # 本条采用的爆款结构 id（见 pipeline/templates.py）
+    hook_category: str = ""      # 本条钩子的心理类别 id（钩子轮换/反重复用，见 templates.HOOK_CATEGORIES）
 
     @property
     def full_narration(self) -> str:
@@ -60,4 +61,5 @@ class Script:
             cta=d.get("cta", ""),
             scenes=scenes,
             template_used=d.get("template_used", ""),
+            hook_category=d.get("hook_category", ""),
         )

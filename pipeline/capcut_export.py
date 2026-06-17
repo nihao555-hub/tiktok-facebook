@@ -1,172 +1,257 @@
-"""导出可在 剪映 / CapCut 桌面端继续精修的草稿 (draft_content.json)。
+"""导出可在 剪映 / CapCut 桌面端继续精修的「做厚」草稿 + 一份 Win/Mac 一键导出包。
 
 成片渲染（final.mp4）由 FFmpeg 在 Linux 上完成（mixer.py + subtitles.py），原生观感的
-卡拉OK字幕/钩子/CTA 已经烧进画面。本模块额外提供"原生可编辑工程"路径——把分镜片段、
-配音、花字按时间轴写成剪映草稿，并**预置好转场 / 入场动画 / 滤镜 / 圆角花字 / CTA 按钮**，
-你在自己电脑的 剪映/CapCut 打开后基本已经装饰好，点导出即可拿到平台原生级质感。
+双语字幕/钩子/CTA 已经烧进画面。本模块额外提供「原生可编辑工程」路径——把分镜片段、配音、
+双语口播字幕、花字、CTA 按时间轴写成剪映草稿，并**预置好转场 / 入场动画 / 场景特效 / 滤镜 /
+花字入出场+循环动画 / 描边阴影 / 动效 CTA 按钮**（按爆款结构分预设，避免同质化）。
 
-注意：CapCut/剪映 的转场·贴纸·特效是按资产 id 引用的，只有在桌面端 App 里才会真正渲染，
-所以这条路径的"成品 mp4"需要在 App 内点一次导出（Linux 无界面环境无法直接烘焙这些原生特效）。
+⚠️ 硬限制：CapCut / 剪映 桌面端只有 Windows / macOS，没有 Linux 版。本流水线跑在 Linux 上，
+**无法在这台机器里打开 App 把这些原生特效烘焙成 mp4**。因此本模块产出两样东西：
+  1. draft_content.json —— Linux 端构建的预览草稿（引用的是 Linux 素材路径，仅供查看/校验）；
+  2. capcut_bundle/    —— **给你的 Win/Mac 一键导出包**：内含拷贝好的素材 + scenes.json +
+     decoration.json + 自包含重建脚本 make_capcut_draft.py（用本地路径在你电脑的 CapCut/剪映
+     草稿库里重建出完全相同的「做厚」草稿）+ 一键导出_Windows.bat / 一键导出_Mac.command +
+     说明。你在自己电脑上双击一键脚本，它会把草稿装进 CapCut，打开后点导出即得顶级装饰版。
 
-装饰按"爆款结构"分预设（DECORATION_PRESETS），不同结构用不同转场/动画/滤镜，避免同质化。
+装饰逻辑的唯一真相源是 capcut_core.py（自包含、只依赖 pyJianYingDraft），它会被一并拷进包里，
+保证 Linux 预览草稿与你电脑上重建的草稿装饰**完全一致**。
 """
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
 from pathlib import Path
 
-from . import ffmpeg_utils as ff
+from . import capcut_core
 from .config import TaskConfig
 from .script_model import Script
 
-# 每个爆款结构一套装饰预设：转场 / 视频入场动画 / 滤镜 / 花字入场·出场。
-# 用「子串」而不是写死枚举名——pyJianYingDraft 的枚举名是中文，按子串匹配更稳，找不到回退首个。
-_DEFAULT_PRESET: dict = {
-    "transition": ["叠化", "叠", "闪黑", "闪"],
-    "v_intro": ["轻微放大", "放大", "渐显"],
-    "filter": ["清晰", "通透", "明亮", "奶油"],
-    "filter_intensity": 20.0,
-    "t_intro": ["弹入", "放大", "渐显"],
-    "t_outro": ["渐隐", "缩小"],
-}
-DECORATION_PRESETS: dict[str, dict] = {
-    # 工厂溯源(B2B)：克制、可信，柔和叠化 + 轻微推近 + 通透质感滤镜
-    "factory_tour": {**_DEFAULT_PRESET, "transition": ["叠化", "横向拉伸", "推近", "叠"],
-                     "filter": ["清晰", "通透", "质感"], "filter_intensity": 16.0,
-                     "t_intro": ["放大", "弹入"], "t_outro": ["渐隐", "缩小"]},
-    # 老板出镜(B2B)：真实、口播感，花字打字机入场、几乎不加滤镜
-    "founder_direct": {**_DEFAULT_PRESET, "t_intro": ["打字机", "弹入"],
-                       "filter_intensity": 10.0},
-    # 前后对比：强冲击，闪白/闪黑转场 + 放大花字
-    "before_after": {**_DEFAULT_PRESET, "transition": ["闪白", "闪黑", "叠化"],
-                     "t_intro": ["放大", "弹入"]},
-    # 解压/ASMR：丝滑叠化 + 奶油通透
-    "satisfying_asmr": {**_DEFAULT_PRESET, "transition": ["叠化", "云", "叠"],
-                        "filter": ["奶油", "通透", "清晰"]},
-}
+# 给 Win/Mac 重建用的自包含脚本（不依赖本仓库，只 import 同目录的 capcut_core）。
+# 它读取 meta.json + scenes.json，把素材按本地路径在 CapCut/剪映 草稿库里重建出做厚草稿。
+_REBUILD_PY = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# 在你自己的 Windows / macOS 电脑上运行：把「做厚」草稿装进 CapCut/剪映 草稿库。
+# 用法：双击 一键导出_Windows.bat / 一键导出_Mac.command，或手动：
+#     python make_capcut_draft.py [可选:你的草稿库目录]
+# 跑完打开 CapCut/剪映 → 在草稿列表看到本草稿 → 检查后点「导出」即得顶级装饰版 mp4。
+import json
+import os
+import sys
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE))
+
+try:
+    import pyJianYingDraft  # noqa: F401
+except Exception:
+    print("缺少依赖 pyJianYingDraft，请先安装：")
+    print("    python -m pip install pyJianYingDraft")
+    sys.exit(1)
+
+import capcut_core
+from pyJianYingDraft import DraftFolder
+
+meta = json.loads((BASE / "meta.json").read_text(encoding="utf-8"))
+scenes = json.loads((BASE / "scenes.json").read_text(encoding="utf-8"))
+
+# 把分镜里的相对素材路径解析为本地绝对路径
+for sc in scenes:
+    for k in ("clip", "audio"):
+        if sc.get(k):
+            sc[k] = str((BASE / sc[k]).resolve())
+
+# CapCut / 剪映 草稿库常见位置（按 OS 探测；也可在命令行第 1 个参数手动指定）
+def candidate_roots():
+    home = Path.home()
+    la = os.environ.get("LOCALAPPDATA", "")
+    roots = []
+    if la:
+        roots += [
+            Path(la) / "CapCut" / "User Data" / "Projects" / "com.lveditor.draft",
+            Path(la) / "JianyingPro" / "User Data" / "Projects" / "com.lveditor.draft",
+        ]
+    roots += [
+        home / "Movies" / "CapCut" / "User Data" / "Projects" / "com.lveditor.draft",
+        home / "Movies" / "JianyingPro" / "User Data" / "Projects" / "com.lveditor.draft",
+    ]
+    return roots
+
+root = None
+if len(sys.argv) > 1 and sys.argv[1].strip():
+    root = Path(sys.argv[1].strip())
+else:
+    for r in candidate_roots():
+        if r.exists():
+            root = r
+            break
+if root is None:
+    root = BASE / "_CapCut_drafts"
+    root.mkdir(parents=True, exist_ok=True)
+    print("没自动找到 CapCut/剪映 草稿库，已先生成到本地文件夹：")
+    print("   ", root)
+    print("若要直接进 CapCut 草稿列表，请把该目录的内容拷进你的草稿库，")
+    print("或重跑并把草稿库路径作为参数传入：python make_capcut_draft.py <你的草稿库目录>")
+
+draft_name = meta.get("draft_name") or "tiktok_factory_draft"
+folder = DraftFolder(str(root))
+s = folder.create_draft(draft_name, int(meta["width"]), int(meta["height"]),
+                        int(meta.get("fps", 30)), allow_replace=True)
+capcut_core.build_script(meta, scenes, script=s)
+s.save()
+print("已生成做厚草稿：", draft_name)
+print("草稿库：", root)
+print("现在打开 CapCut / 剪映，在草稿列表里找到它，检查无误后点『导出』即可。")
+'''
+
+_BAT = (
+    "@echo off\r\n"
+    "chcp 65001 >nul\r\n"
+    "cd /d \"%~dp0\"\r\n"
+    "echo 正在把做厚草稿装进 CapCut/剪映 草稿库...\r\n"
+    "py -3 make_capcut_draft.py %*\r\n"
+    "if errorlevel 1 python make_capcut_draft.py %*\r\n"
+    "echo.\r\n"
+    "echo 完成后请打开 CapCut/剪映，在草稿列表里找到草稿，检查后点导出。\r\n"
+    "pause\r\n"
+)
+
+_COMMAND = (
+    "#!/bin/bash\n"
+    "cd \"$(dirname \"$0\")\"\n"
+    "echo '正在把做厚草稿装进 CapCut/剪映 草稿库...'\n"
+    "python3 make_capcut_draft.py \"$@\"\n"
+    "echo '完成后请打开 CapCut/剪映，在草稿列表里找到草稿，检查后点导出。'\n"
+)
 
 
-def _preset(template_used: str) -> dict:
-    return DECORATION_PRESETS.get((template_used or "").strip(), _DEFAULT_PRESET)
+def _slug(text: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9_]+", "_", (text or "").strip()).strip("_")
+    return s[:48] or "draft"
 
 
-def _pick(enum, subs: list[str]):
-    """按子串优先级在枚举里挑一个成员，全找不到则回退到第一个（避免崩）。"""
-    for s in subs:
-        for member in enum:
-            if s in member.name:
-                return member
-    return list(enum)[0]
+def _scene_data(script: Script, work: Path, assets_rel: str | None = None) -> list[dict]:
+    """把脚本分镜整理成 capcut_core 需要的结构。
+
+    assets_rel 给定时返回相对路径（用于打包，路径相对 bundle 根）；否则返回 Linux 绝对路径。
+    """
+    out: list[dict] = []
+    for scene in script.scenes:
+        clip = work / "clips" / f"scene_{scene.index:02d}.mp4"
+        aud = work / "audio" / f"a_{scene.index:02d}.mp3"
+        if assets_rel is not None:
+            clip_v = f"{assets_rel}/{clip.name}" if clip.exists() else None
+            aud_v = f"{assets_rel}/{aud.name}" if aud.exists() else None
+        else:
+            clip_v = str(clip) if clip.exists() else None
+            aud_v = str(aud) if aud.exists() else None
+        out.append({
+            "clip": clip_v,
+            "audio": aud_v,
+            "on_screen_text": scene.on_screen_text,
+            "narration_th": scene.narration,
+            "narration_zh": scene.narration_zh,
+            "seconds": float(scene.seconds),
+        })
+    return out
+
+
+def _meta(script: Script, cfg: TaskConfig, draft_name: str) -> dict:
+    return {
+        "draft_name": draft_name,
+        "width": cfg.width,
+        "height": cfg.height,
+        "fps": cfg.fps,
+        "hook": script.hook,
+        "cta": script.cta,
+        "template_used": script.template_used or script.template,
+        "template": script.template,
+        "language": cfg.language,
+    }
+
+
+def _build_bundle(script: Script, cfg: TaskConfig, work: Path, bundle: Path,
+                  draft_name: str) -> None:
+    """生成 Win/Mac 一键导出包（拷素材 + json + 重建脚本 + 一键脚本 + 说明）。"""
+    assets = bundle / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    for scene in script.scenes:
+        for src in (work / "clips" / f"scene_{scene.index:02d}.mp4",
+                    work / "audio" / f"a_{scene.index:02d}.mp3"):
+            if src.exists():
+                shutil.copy2(src, assets / src.name)
+
+    meta = _meta(script, cfg, draft_name)
+    (bundle / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    (bundle / "scenes.json").write_text(
+        json.dumps(_scene_data(script, work, assets_rel="assets"),
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    # 实际挑中的装饰枚举（便于查看/复现）
+    deco = {}
+    try:
+        deco = capcut_core.describe(meta)
+    except Exception as e:  # noqa: BLE001
+        deco = {"error": str(e)}
+    (bundle / "decoration.json").write_text(
+        json.dumps(deco, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 自包含装饰核心 + 重建脚本 + 一键脚本
+    shutil.copy2(Path(capcut_core.__file__), bundle / "capcut_core.py")
+    (bundle / "make_capcut_draft.py").write_text(_REBUILD_PY, encoding="utf-8")
+    bat = bundle / "一键导出_Windows.bat"
+    bat.write_text(_BAT, encoding="utf-8-sig")
+    cmd = bundle / "一键导出_Mac.command"
+    cmd.write_text(_COMMAND, encoding="utf-8")
+    try:
+        cmd.chmod(0o755)
+    except OSError:
+        pass
+
+    (bundle / "README_一键导出.txt").write_text(
+        "【Win/Mac 一键导出顶级装饰版】\n\n"
+        "为什么需要这一步：CapCut/剪映 只有 Windows/macOS 版，生成视频的服务器是 Linux，\n"
+        "没法在服务器里打开 App 渲染原生转场/特效/花字。所以把草稿+素材打包给你，在你自己\n"
+        "电脑上一键重建并导出。\n\n"
+        "步骤：\n"
+        "1) 先装好 CapCut（或剪映）桌面版，并打开过一次（让它建好草稿库目录）。\n"
+        "2) 装 Python 3（python.org），然后装依赖：python -m pip install pyJianYingDraft\n"
+        "3) Windows：双击『一键导出_Windows.bat』；  Mac：双击『一键导出_Mac.command』。\n"
+        "   （脚本会把做厚草稿装进 CapCut/剪映 的草稿库。若没自动找到草稿库，可在命令行把\n"
+        "    草稿库目录作为参数传入：python make_capcut_draft.py <你的草稿库目录>）\n"
+        "4) 打开 CapCut/剪映 → 草稿列表里找到这个草稿 → 检查（转场/花字/特效都已摆好）→ 点『导出』。\n\n"
+        "草稿里已预置：按爆款结构选的转场、片段入场动画、场景特效、滤镜、泰文(大)+中文(小)\n"
+        "双语口播字幕（描边阴影、无黑底）、花字关键词（循环动画）、红色动效 CTA 按钮。\n"
+        "泰文已指定 Kanit 字体、中文用思源/台北黑体，避免方块豆腐。\n"
+        "decoration.json 记录了本片实际用到的转场/特效/字体名称，便于你查看或微调。\n",
+        encoding="utf-8",
+    )
 
 
 def export(script: Script, cfg: TaskConfig, work: Path, draft_dir: Path) -> Path:
-    from pyJianYingDraft import (
-        AudioMaterial,
-        AudioSegment,
-        ClipSettings,
-        FilterType,
-        IntroType,
-        ScriptFile,
-        TextBackground,
-        TextIntro,
-        TextOutro,
-        TextSegment,
-        TextStyle,
-        TrackType,
-        TransitionType,
-        VideoMaterial,
-        VideoSegment,
-        trange,
-    )
-
-    p = _preset(script.template_used or script.template)
-    trans = _pick(TransitionType, p["transition"])
-    v_intro = _pick(IntroType, p["v_intro"])
-    filt = _pick(FilterType, p["filter"])
-    t_intro = _pick(TextIntro, p["t_intro"])
-    t_outro = _pick(TextOutro, p["t_outro"])
-
-    s = ScriptFile(cfg.width, cfg.height, cfg.fps, True)
-    s.add_track(TrackType.video)
-    s.add_track(TrackType.audio)
-    # 三条独立文字轨：分镜花字 / 钩子 / CTA，避免时间重叠（剪映同轨不允许重叠）
-    s.add_track(TrackType.text, "caption")
-    s.add_track(TrackType.text, "hook")
-    s.add_track(TrackType.text, "cta")
-
-    def _safe(fn) -> None:
-        """装饰是尽力而为的：某个特效/动画在当前 pyJianYingDraft 版本不可用时跳过，不让整份草稿崩。"""
-        try:
-            fn()
-        except Exception as e:  # noqa: BLE001
-            print(f"  [capcut] 跳过一个装饰: {e}", flush=True)
-
-    def _cap(path: Path, target: float) -> float:
-        """把片段时长夹到不超过素材真实时长（留 50ms 余量，避开 µs 取整溢出）。"""
-        mat = ff.duration(path)
-        if mat <= 0:
-            return target
-        return round(min(target, mat - 0.05), 3)
-
-    def _add_text(text: str, start: float, dur: float, *, size: float,
-                  color: tuple[float, float, float], bg_hex: str, bg_alpha: float,
-                  y: float, round_r: float = 0.28, track: str = "caption") -> None:
-        if not text or dur <= 0:
-            return
-        seg = TextSegment(
-            text,
-            trange(f"{start}s", f"{dur}s"),
-            style=TextStyle(size=size, bold=True, color=color, align=1, max_line_width=0.82),
-            background=TextBackground(color=bg_hex, alpha=bg_alpha, round_radius=round_r,
-                                      height=0.16, width=0.14),
-            clip_settings=ClipSettings(transform_y=y),
-        )
-        _safe(lambda: seg.add_animation(t_intro, "0.5s"))
-        _safe(lambda: seg.add_animation(t_outro, "0.4s"))
-        s.add_segment(seg, track_name=track)
-
-    scenes = list(script.scenes)
-    total = sum(float(sc.seconds) for sc in scenes)
-    t = 0.0
-    for i, scene in enumerate(scenes):
-        vid = work / "clips" / f"scene_{scene.index:02d}.mp4"
-        aud = work / "audio" / f"a_{scene.index:02d}.mp3"
-        dur = float(scene.seconds)
-        if vid.exists():
-            vdur = _cap(vid, dur)
-            vseg = VideoSegment(VideoMaterial(str(vid)), trange(f"{t}s", f"{vdur}s"))
-            _safe(lambda v=vseg: v.add_filter(filt, p["filter_intensity"]))
-            _safe(lambda v=vseg: v.add_animation(v_intro, "0.6s"))
-            if i < len(scenes) - 1:
-                _safe(lambda v=vseg: v.add_transition(trans, duration="0.4s"))
-            s.add_segment(vseg)
-        if aud.exists():
-            adur = _cap(aud, dur)
-            s.add_segment(AudioSegment(AudioMaterial(str(aud)), trange(f"{t}s", f"{adur}s")))
-        # 分镜大字（花字）：白字 + 半透明圆角黑底，放下三分之一
-        _add_text(scene.on_screen_text, t, min(dur, 3.2), size=8.0, color=(1.0, 1.0, 1.0),
-                  bg_hex="#000000", bg_alpha=0.55, y=-0.78)
-        t += dur
-
-    # 钩子：开头大字，放上三分之一
-    if script.hook:
-        _add_text(script.hook, 0.0, min(2.6, total or 2.6), size=11.0, color=(1.0, 1.0, 1.0),
-                  bg_hex="#000000", bg_alpha=0.42, y=0.66, track="hook")
-    # CTA：结尾红色按钮，放下方（高于字幕）
-    if script.cta and total > 1:
-        cta_dur = min(4.2, total)
-        _add_text(script.cta, max(total - cta_dur, 0.0), cta_dur, size=8.5,
-                  color=(1.0, 1.0, 1.0), bg_hex="#FE2C55", bg_alpha=0.96, y=-0.6, round_r=0.5,
-                  track="cta")
-
     draft_dir.mkdir(parents=True, exist_ok=True)
+    draft_name = f"{_slug(cfg.project)}_{_slug(script.template_used or script.template)}"
+
+    # 1) Linux 端预览草稿（引用 Linux 素材路径，仅供查看/校验装饰是否正确构建）
+    meta = _meta(script, cfg, draft_name)
+    scenes_data = _scene_data(script, work)
+    s = capcut_core.build_script(meta, scenes_data)
     s.dump(str(draft_dir / "draft_content.json"))
+
+    # 2) 给你的 Win/Mac 一键导出包
+    bundle = draft_dir / "capcut_bundle"
+    _build_bundle(script, cfg, work, bundle, draft_name)
+
     (draft_dir / "HOW_TO_OPEN.txt").write_text(
-        "把 draft_content.json 放进 剪映/CapCut 的一个草稿文件夹中（替换其 draft_content.json），\n"
-        "或用 pyJianYingDraft 的 DraftFolder 写入你的草稿库目录后，在桌面端打开继续精修。\n"
-        "草稿已预置：转场 / 入场动画 / 滤镜 / 圆角花字 / 红色 CTA 按钮，打开后点导出即可。\n"
-        "若泰文显示为方块，在 CapCut 里把文字字体换成任一支持泰文的字体（如 Kanit/Sarabun），\n"
-        "或直接用 CapCut 的『自动字幕』识别配音生成口播字幕。\n",
+        "本目录有两样东西：\n"
+        "1) draft_content.json —— Linux 端构建的预览草稿（引用服务器素材路径，仅供查看）。\n"
+        "2) capcut_bundle/    —— 给你 Windows/Mac 的『一键导出顶级装饰版』包。\n\n"
+        "要拿到顶级装饰成片：把 capcut_bundle/ 整个文件夹拷到你自己的电脑，按里面的\n"
+        "README_一键导出.txt 操作（双击一键脚本→打开 CapCut/剪映→点导出）。\n\n"
+        "说明：CapCut/剪映 没有 Linux 版，服务器无法直接把原生特效烘焙成 mp4，所以最终\n"
+        "导出这一步需要在你自己的 Windows/Mac 上完成。Linux 上已经能出『烧字版』final.mp4。\n",
         encoding="utf-8",
     )
     return draft_dir

@@ -20,3 +20,6 @@ output/*
 
 # whisper model cache
 *.bin
+
+# 创意差异化层的品牌记忆（运行期状态）
+brand_memory/

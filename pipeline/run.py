@@ -20,6 +20,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import brand
 from . import ffmpeg_utils as ff
 from . import mixer, subtitles, templates
 from .config import REPO_ROOT, Secrets, TaskConfig
@@ -131,6 +132,9 @@ def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool,
 
     script_path = outdir / "script.json"
     strategy_path = outdir / "strategy.json"
+    # 创意差异化层：加载该工厂的品牌母题 + 历史，用于「换厂不撞款」
+    mem = brand.load_memory(cfg)
+    print(f"[0/5] 创意差异化层：{brand.summary_line(mem, cfg)}", flush=True)
     if resume and script_path.exists():
         strategy = (
             json.loads(strategy_path.read_text(encoding="utf-8"))
@@ -140,13 +144,18 @@ def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool,
         print("[resume] 复用已有 strategy.json / script.json，不再调用 LLM", flush=True)
         _print_strategy(strategy)
     else:
-        strategy = llm.generate_strategy(cfg, secrets)
+        strategy = llm.generate_strategy(cfg, secrets, mem=mem)
         strategy_path.write_text(
             json.dumps(strategy, ensure_ascii=False, indent=2), encoding="utf-8")
         _print_strategy(strategy)
 
-        script = llm.generate_script(cfg, secrets, strategy=strategy)
+        script = llm.generate_script(cfg, secrets, strategy=strategy, mem=mem)
         script_path.write_text(script.to_json(), encoding="utf-8")
+        # 记录本次用过的 钩子类别/结构/开场，并首次落地品牌母题，供下次「必须明显不同」
+        brand.record_run(mem, strategy, script)
+        mempath = brand.save_memory(mem)
+        print(f"    🧬 已更新品牌记忆：{mempath.name}（钩子类别=[{script.hook_category or '?'}]，"
+              f"结构=[{script.template_used or '?'}]）", flush=True)
     tpl = templates.get(script.template_used)
     tpl_name = tpl["name_zh"] if tpl else (script.template_used or "auto")
     print(f"[1/5] 脚本就绪：{len(script.scenes)} 个分镜，"

@@ -9,7 +9,7 @@ import json
 import re
 import time
 
-from .. import templates
+from .. import brand, templates
 from ..config import REPO_ROOT, Secrets, TaskConfig
 from ..script_model import Scene, Script
 
@@ -50,11 +50,19 @@ pinned structure). Build the scenes so they FOLLOW the chosen structure's beats 
 but improvise the wording, hook angle and shots freely inside it — never canned lines.
 Return the id of the structure you used in "template_used".
 
+DIFFERENTIATION (IMPORTANT): you may be given this factory's persistent BRAND SIGNATURE and a
+list of hook angles / structures already used. Keep the brand signature consistent (so the
+factory is recognizable) but make THIS video clearly different from the recent ones — rotate
+to a fresh hook category and a fresh opening shot. Report the hook category you used in
+"hook_category" (one of: curiosity_gap, contrarian, transformation, pov_identity,
+direct_question, stat_shock).
+
 Return STRICT JSON only, matching this schema:
 {
   "hook": "first 3s on-screen text (scroll-stopper)",
   "cta": "final call to action",
   "template_used": "the viral structure id you followed",
+  "hook_category": "the hook-bank category id this video's opening uses",
   "scenes": [
     {"index": 0,
      "image_prompt": "one photorealistic still to generate",
@@ -164,11 +172,30 @@ Return STRICT JSON only (no markdown), matching:
   "proof_to_show": ["concrete on-screen proof: numbers, certs, capacity, demos, before/after"],
   "native_format_notes": "how real viral videos in this niche/market look & sound",
   "recommended_template": "the viral structure id that best fits",
+  "brand_signature": {
+    "signature_motif": "this factory's ONE recognizable recurring motif / through-line",
+    "brand_personality": "3-5 adjectives describing the brand's on-camera personality",
+    "hero_product": "the single hero product/capability to anchor the brand around",
+    "unique_evidence": ["the proprietary, hard-to-copy proof that sets THIS factory apart"],
+    "founder_story": "a short, human origin/why story to humanize the factory",
+    "visual_motifs": ["recurring visual signatures: a color, a shot, a gesture, a sound"],
+    "tagline": "a short memorable brand line"
+  },
   "do_not": ["homogenized / cringe / over-polished traps to avoid"]
-}"""
+}
+If a BRAND SIGNATURE is already provided to you, keep it CONSISTENT (you may refine but not
+contradict it) and return it in brand_signature."""
 
 
-def _strategy_user_prompt(cfg: TaskConfig) -> str:
+def _diff_block(cfg: TaskConfig, mem: dict | None) -> str:
+    """创意差异化层指令（品牌母题 + 反重复轮换）；无记忆时返回空串。"""
+    if not mem:
+        return ""
+    text = brand.directives(cfg, mem)
+    return f"{text}\n\n" if text else ""
+
+
+def _strategy_user_prompt(cfg: TaskConfig, mem: dict | None = None) -> str:
     brief = cfg.get("brief", default={}) or {}
     btype = "B2B factory sourcing" if cfg.template == "factory" else "B2C product"
     focus = _focus_directive(cfg)
@@ -178,6 +205,7 @@ def _strategy_user_prompt(cfg: TaskConfig) -> str:
         f"Video type: {cfg.template} ({btype}).\n"
         f"{_lang_directive(cfg)}\n\n"
         f"{focus_block}"
+        f"{_diff_block(cfg, mem)}"
         f"Available viral structures (pick the best id for recommended_template):\n"
         f"{templates.menu(cfg.template)}\n\n"
         f"{templates.hook_bank()}\n\n"
@@ -212,7 +240,7 @@ def _strategy_fallback(cfg: TaskConfig) -> dict:
     }
 
 
-def generate_strategy(cfg: TaskConfig, secrets: Secrets) -> dict:
+def generate_strategy(cfg: TaskConfig, secrets: Secrets, mem: dict | None = None) -> dict:
     """先让 LLM 当买家画像专家/创意总监想清楚策略，再用它指导写脚本。"""
     if not secrets.llm_api_key:
         return _strategy_fallback(cfg)
@@ -223,7 +251,7 @@ def generate_strategy(cfg: TaskConfig, secrets: Secrets) -> dict:
     )
     messages = [
         {"role": "system", "content": _STRATEGY_SYSTEM},
-        {"role": "user", "content": _strategy_user_prompt(cfg)},
+        {"role": "user", "content": _strategy_user_prompt(cfg, mem)},
     ]
     for attempt in range(1, 4):
         try:
@@ -271,7 +299,8 @@ def _structure_directive(cfg: TaskConfig) -> str:
     )
 
 
-def _user_prompt(cfg: TaskConfig, strategy: dict | None = None) -> str:
+def _user_prompt(cfg: TaskConfig, strategy: dict | None = None,
+                 mem: dict | None = None) -> str:
     brief = cfg.get("brief", default={}) or {}
     n = int(cfg.get("clipgen", "scene_count", default=5))
     refs = _available_refs()
@@ -294,6 +323,7 @@ def _user_prompt(cfg: TaskConfig, strategy: dict | None = None) -> str:
         f"{strategy_block}"
         f"Template: {cfg.template}\n{_lang_directive(cfg)}\n\n"
         f"{focus_block}"
+        f"{_diff_block(cfg, mem)}"
         f"{_structure_directive(cfg)}\n\n"
         f"{templates.hook_bank()}\n\n"
         f"Target total length: ~{cfg.target_seconds}s across {n} scenes.\n"
@@ -372,7 +402,7 @@ def _template_fallback(cfg: TaskConfig) -> Script:
 
 
 def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3,
-              strategy: dict | None = None) -> Script:
+              strategy: dict | None = None, mem: dict | None = None) -> Script:
     from openai import OpenAI
 
     client = OpenAI(
@@ -380,7 +410,7 @@ def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3,
     )
     messages = [
         {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": _user_prompt(cfg, strategy)},
+        {"role": "user", "content": _user_prompt(cfg, strategy, mem)},
     ]
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -412,7 +442,7 @@ def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3,
 
 
 def generate_script(cfg: TaskConfig, secrets: Secrets,
-                    strategy: dict | None = None) -> Script:
+                    strategy: dict | None = None, mem: dict | None = None) -> Script:
     if not secrets.llm_api_key:
         return _template_fallback(cfg)
-    return _call_llm(cfg, secrets, strategy=strategy)
+    return _call_llm(cfg, secrets, strategy=strategy, mem=mem)
