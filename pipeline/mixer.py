@@ -74,22 +74,16 @@ def render_final(
     bgm_override: str | None = None,
 ) -> Path:
     dec = cfg.get("decorate", default={}) or {}
-    total = ff.duration(base)
     logo = _resolve(dec.get("logo", ""))
     bgm = _resolve(bgm_override) if bgm_override else _resolve(dec.get("bgm", ""))
-    progress = bool(dec.get("progress_bar", True))
     bgm_vol = float(dec.get("bgm_volume", 0.18))
-    w = cfg.width
 
     tokens: list[str] = ["-i", str(base)]
     nxt = 1
-    li = pi = bi = None
+    li = bi = None
     if logo:
         tokens += ["-i", str(logo)]
         li, nxt = nxt, nxt + 1
-    if progress:
-        tokens += ["-f", "lavfi", "-t", f"{total:.3f}", "-i", f"color=c=yellow@0.9:s={w}x14"]
-        pi, nxt = nxt, nxt + 1
     if bgm:
         tokens += ["-stream_loop", "-1", "-i", str(bgm)]
         bi, nxt = nxt, nxt + 1
@@ -100,9 +94,6 @@ def render_final(
 
     fc = f"[0:v]{ass_arg}[v0]"
     cur = "[v0]"
-    if pi is not None:
-        fc += f";{cur}[{pi}:v]overlay=x='W*(t/{total:.3f} - 1)':y=0[vp]"
-        cur = "[vp]"
     if li is not None:
         fc += f";[{li}:v]scale=iw*0.14:-1[lg];{cur}[lg]overlay=W-w-30:40[vout]"
         cur = "[vout]"

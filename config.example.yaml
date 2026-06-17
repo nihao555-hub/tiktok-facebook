@@ -3,7 +3,15 @@
 
 project: "demo"
 template: product          # factory | product
-language: en               # 文案/配音语言
+language: en               # 文案/配音语言 (en|th|zh|id|vi|ms...)
+                           # 注：泰语 th 请配合 TTS_MODEL=eleven_v3 + 泰文字体 Kanit-Bold.ttf
+
+# 爆款「通用接口模版」：指导 AI 按验证过的爆款结构拍片（详见 docs/VIRAL_TEMPLATES.md）
+# auto = 让 AI 从模版库自选最契合的一个；或钉死某个 id 做 A/B：
+#   pas|before_after|i_tested_it|unboxing|wait_for_it|listicle|pov_story|
+#   comparison|tutorial|satisfying_asmr|factory_tour|founder_direct
+# 查看全部：python -m pipeline.run --list-templates
+viral_template: auto
 
 video:
   width: 1080
@@ -20,35 +28,61 @@ brief:
     - "aluminum, holds up to 10kg"
   target_market: "US office workers / remote workers"
   cta: "Tap the cart 🛒 limited 30% off"
+  # 你的真实商品照片：填了之后视频里就是你这款真货（出图/运镜强约束商品 1:1 不变形）。
+  # 可写仓库相对路径、绝对路径、或直接放到 media/refs/ 后只写文件名。
+  # 建议 2-4 张「同一产品不同角度」(正面/侧面/背面/logo特写)，最多取 6 张；不是越多越好。
+  product_images: []        # 例: ["media/refs/my_bottle_front.jpg", "media/refs/my_bottle_side.jpg"]
 
-# AI 片段生成（每个分镜一段）。provider=local 时改为读取 media/clips 下的素材
+# 创意差异化层：防止换工厂/多条片同质化（品牌母题 + 钩子轮换 + 反重复记忆）
+# 每个工厂第一次跑会由 LLM 生成一份"品牌母题档案"(招牌母题/性格/英雄产品/独家证据/创始故事)
+# 并持久化到 brand_memory/<id>.json；之后每条片都注入它保持品牌一致，同时强制避开最近用过的
+# 钩子类别/结构/开场，做到"同一品牌、每条不同"。
+differentiation:
+  enabled: true
+  recent_window: 6          # 反重复时回看最近几条历史
+brand:
+  id: ""                    # 留空=按 brief 自动派生稳定 id；多工厂请各填不同 id 以隔离记忆
+
+# AI 片段生成（每个分镜一段）。
+# CLIPGEN_PROVIDER=wuyinkeji 时：gpt-image-2 出超写实图(吃 media/refs 真实素材) -> 无垠把图动起来
+# CLIPGEN_PROVIDER=local 时：读取 media/clips 下的素材（无则合成占位）
 clipgen:
   scene_count: 5
   seconds_per_scene: 5
+  video_seconds: 10        # 在线视频生成每段时长（混剪阶段会按配音裁到精确长度）
+  video_retries: 3         # 图生视频失败重试次数：瞬时错误(通道/超时/限流)退避后原样重试，内容/安全失败则软化prompt再试
+  image_retries: 2         # gpt-image-2 出图失败重试次数（仍失败则退化为文生视频）
+  preserve_product: true   # 有 brief.product_images 时强约束商品 1:1 还原、运镜中不变形（推销真货必开）
 
 # 配音
 tts:
   rate: "+8%"              # 语速
   volume: "+0%"
+  voice_lang: ""          # 配音语言：留空=跟随 language；th=泰语(原生 EdgeTTS,免费)；zh=中文(走 ElevenLabs)
+  voice: ""              # 指定音色(EdgeTTS 神经音色名或 ElevenLabs voice_id)；留空=按语言自动选
+  voice_zh: ""           # 中文配音专用 ElevenLabs voice_id（留空则用 voice / 账号默认音色）
 
-# 字幕（卡拉OK逐字高亮，平台原生感）
+# 字幕（短句逐句弹入 pop-in，白字黑描边，平台原生感）
 subtitles:
   enabled: true
+  lang_mode: main          # 字幕语言：bilingual=中泰双语(泰大+中小) | th/main=单目标语言 | zh=单中文(自动用 CJK 字体)
   whisper_model: small     # tiny|base|small|medium  （越大越准越慢）
-  font: "DejaVu Sans"      # 字体名；也可填 assets/fonts/xxx.ttf 路径
-  font_size: 64
-  max_words: 3             # 每屏最多几个词（TikTok 逐词/短句风格）
-  primary_color: "&H00FFFFFF"     # 白
-  highlight_color: "&H0000FFFF"   # 黄 (高亮)
-  margin_v: 320
+  font: "assets/fonts/Montserrat-Bold.ttf"  # 英文用 Montserrat；泰文用 assets/fonts/Kanit-Bold.ttf
+  zh_font: "WenQuanYi Zen Hei"  # lang_mode=zh 时主字幕用的 CJK 字体（系统自带，libass 经 fontconfig 解析）
+  font_size: 54            # 留空则按分辨率自适应（基准 720x1280）
+  max_words: 3             # 有空格语言(英/西等)：每屏最多几个词
+  max_chars: 16            # 无空格语言(泰/中/日)：每屏最多几个字
+  primary_color: "&H00FFFFFF"     # 白字 + 黑描边（原生爆款字幕样式）
+  margin_v: 300            # 字幕在下三分之一，避开底部 UI 安全区
 
-# 平台原生装饰
+# 平台原生装饰（对标 TikTok/Reels 真实形式）
 decorate:
   bgm: ""                  # 留空=不加；填 media/bgm/xxx.mp3
   bgm_volume: 0.18
-  logo: ""                 # 品牌水印 png，留空=不加
-  progress_bar: true       # 顶部进度条
-  cta_sticker: true        # 结尾 CTA 贴纸（用 brief.cta 文本）
+  logo: ""                 # 品牌水印 png，留空=不加（建议留空，原生视频不挂大 logo）
+  progress_bar: false      # 顶部进度条非原生，默认关闭
+  cta_sticker: true        # 左下角 TikTok 红购物按钮样式 CTA（用 brief.cta 文本）
+  strip_ai_watermark: true # 裁掉 AI 视频右下角角标水印（看不出 AI）
 
 # 批量 A/B 多版本（投流测素材）：会按下面的组合各产一条
 variants:

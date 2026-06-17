@@ -31,6 +31,19 @@ def duration(path: str | Path) -> float:
         return 0.0
 
 
+def dimensions(path: str | Path) -> tuple[int, int]:
+    out = subprocess.run(
+        [FFPROBE, "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "json", str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        st = json.loads(out.stdout)["streams"][0]
+        return int(st["width"]), int(st["height"])
+    except Exception:  # noqa: BLE001
+        return 0, 0
+
+
 def has_audio(path: str | Path) -> bool:
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-select_streams", "a",
