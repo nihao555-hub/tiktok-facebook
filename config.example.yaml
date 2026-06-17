@@ -46,6 +46,8 @@ clipgen:
   scene_count: 5
   seconds_per_scene: 5
   video_seconds: 10        # 在线视频生成每段时长（混剪阶段会按配音裁到精确长度）
+  video_retries: 3         # 图生视频失败重试次数：瞬时错误(通道/超时/限流)退避后原样重试，内容/安全失败则软化prompt再试
+  image_retries: 2         # gpt-image-2 出图失败重试次数（仍失败则退化为文生视频）
 
 # 配音
 tts:

@@ -48,6 +48,22 @@ _RISKY = (
 )
 
 
+# 瞬时性错误（重试同一请求可能恢复）：无可用通道 / 超时 / 限流 / 网络 / 5xx 等。
+# 这类失败软化 prompt 没用，应该退避后「原样」重试。
+_TRANSIENT = (
+    "no available channel", "no channel", "通道", "timeout", "超时", "timed out",
+    "rate limit", "ratelimit", "too many", "429", "500", "502", "503", "504",
+    "connection", "connect", "reset", "temporar", "try again", "overload",
+    "busy", "unavailable", "gateway", "重试", "繁忙", "排队", "稍后",
+)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """是否为瞬时性错误（原样重试可能恢复）。区别于安全过滤/内容类失败。"""
+    msg = str(exc).lower()
+    return any(m in msg for m in _TRANSIENT)
+
+
 def _soften_prompt(prompt: str, level: int) -> str:
     """level1：去掉敏感词 + 追加安全说明；level2：换成最通用安全推近。"""
     if level >= 2:
@@ -255,30 +271,44 @@ def _wuyin_poll(task_id: str, secrets: Secrets,
 
 
 def _animate_scene(s: Scene, image_url: str, want: int, w: int, h: int,
-                   secrets: Secrets, n: int) -> str:
-    """提交无垠视频生成；被安全过滤拒绝时自动软化重试。返回视频 URL（全部失败则抛错）。
+                   secrets: Secrets, n: int, tries: int = 3) -> str:
+    """提交无垠视频生成；失败自动重试。返回视频 URL（全部失败则抛错）。
+
+    两类失败区别处理：
+    - 安全过滤/内容类失败：换更安全的 prompt（软化）再试，重试同一个没意义；
+    - 瞬时类失败（无可用通道/超时/限流/网络/5xx）：保持同一 prompt，退避后原样重试。
 
     有首帧图时走图生视频（image_url 非空）；首帧出图失败时退化为文生视频，
     此时把画面描述拼进 prompt，让 Veo 没有首帧也能生成真实工厂镜头。
     """
     base = s.mov_prompt if image_url else f"{s.img_prompt}. {s.mov_prompt}".strip()
-    attempts = [
+    variants = [
         (base, "原始运镜"),
         (_soften_prompt(base, 1), "软化运镜(去敏感词)"),
         (_soften_prompt(base, 2), "通用安全推近"),
     ]
+    tries = max(1, tries)
     last_exc: Exception | None = None
-    for prompt, label in attempts:
-        try:
-            task_id = _wuyin_submit(prompt, image_url, w, h, want, secrets)
-            _log(f"  [视频 {s.index + 1}/{n}] 已提交（{label}），轮询中…")
-            return _wuyin_poll(
-                task_id, secrets,
-                on_poll=lambda p: _log(f"  [视频 {s.index + 1}/{n}] 渲染中…(第 {p} 次轮询)"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            _log(f"  [视频 {s.index + 1}/{n}] {label} 失败：{exc}")
+    for prompt, label in variants:
+        for attempt in range(1, tries + 1):
+            try:
+                task_id = _wuyin_submit(prompt, image_url, w, h, want, secrets)
+                _log(f"  [视频 {s.index + 1}/{n}] 已提交（{label}，第{attempt}/{tries}次），轮询中…")
+                return _wuyin_poll(
+                    task_id, secrets,
+                    on_poll=lambda p: _log(f"  [视频 {s.index + 1}/{n}] 渲染中…(第 {p} 次轮询)"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                transient = _is_transient(exc)
+                if transient and attempt < tries:
+                    delay = min(30, 5 * attempt)
+                    _log(f"  [视频 {s.index + 1}/{n}] {label} 瞬时失败：{exc} —— {delay}s 后原样重试")
+                    time.sleep(delay)
+                    continue
+                kind = "瞬时" if transient else "内容/安全"
+                _log(f"  [视频 {s.index + 1}/{n}] {label} {kind}失败：{exc}")
+                break  # 换下一个更安全的 prompt 变体
     raise RuntimeError(str(last_exc))
 
 
@@ -295,6 +325,8 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
         raise RuntimeError("wuyinkeji 链路需要 WUYIN_API_KEY")
     strip_wm = bool(cfg.get("decorate", "strip_ai_watermark", default=True))
     vid_seconds = int(cfg.get("clipgen", "video_seconds", default=10))
+    vid_tries = max(1, int(cfg.get("clipgen", "video_retries", default=3)))
+    img_tries = max(1, int(cfg.get("clipgen", "image_retries", default=2)))
     img_dir = workdir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
     scenes = script.scenes
@@ -310,10 +342,10 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
             _log(f"  [视频 {s.index + 1}/{n}] 复用已生成片段 -> {dst.name}")
             return s.index, dst
         img: imagegen.ImageResult | None = None
-        for attempt in range(2):
+        for attempt in range(1, img_tries + 1):
             try:
                 _log(f"  [图 {s.index + 1}/{n}] gpt-image-2 出图中…"
-                     f"（show_face={s.show_face}，第{attempt + 1}次）")
+                     f"（show_face={s.show_face}，第{attempt}/{img_tries}次）")
                 img = imagegen.generate_image(
                     s.img_prompt, img_path, secrets, width=w, height=h,
                     ref_images=_resolve_refs(s), avoid_frontal_face=not s.show_face,
@@ -321,13 +353,15 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
                 _log(f"  [图 {s.index + 1}/{n}] 出图完成 -> 进入图生视频")
                 break
             except Exception as exc:  # noqa: BLE001
-                _log(f"  [图 {s.index + 1}/{n}] 出图失败（第{attempt + 1}次）：{exc}")
+                _log(f"  [图 {s.index + 1}/{n}] 出图失败（第{attempt}/{img_tries}次）：{exc}")
+                if attempt < img_tries:
+                    time.sleep(min(15, 3 * attempt))
         image_url = img.url if img else ""
         if not image_url:
             _log(f"  [图 {s.index + 1}/{n}] 出图最终失败，改用文生视频（无首帧）兜底")
         want = max(vid_seconds, int(math.ceil(s.seconds)))
         try:
-            video_url = _animate_scene(s, image_url, want, w, h, secrets, n)
+            video_url = _animate_scene(s, image_url, want, w, h, secrets, n, tries=vid_tries)
             raw = workdir / f"raw_{s.index:02d}.mp4"
             _download(video_url, raw)
             delogo = _wm_delogo_box(raw) if strip_wm else None
