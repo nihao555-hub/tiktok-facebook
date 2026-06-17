@@ -29,7 +29,8 @@ brief:
   target_market: "US office workers / remote workers"
   cta: "Tap the cart 🛒 limited 30% off"
   # 你的真实商品照片：填了之后视频里就是你这款真货（出图/运镜强约束商品 1:1 不变形）。
-  # 可写仓库相对路径、绝对路径、或直接放到 media/refs/ 后只写文件名。多角度多张更稳。
+  # 可写仓库相对路径、绝对路径、或直接放到 media/refs/ 后只写文件名。
+  # 建议 2-4 张「同一产品不同角度」(正面/侧面/背面/logo特写)，最多取 6 张；不是越多越好。
   product_images: []        # 例: ["media/refs/my_bottle_front.jpg", "media/refs/my_bottle_side.jpg"]
 
 # 创意差异化层：防止换工厂/多条片同质化（品牌母题 + 钩子轮换 + 反重复记忆）

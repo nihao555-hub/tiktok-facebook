@@ -208,10 +208,15 @@ def _default_refs(limit: int = 4) -> list[str]:
     return [str(p) for p in imgs[:limit]]
 
 
+# 单次出图最多带几张参考图：多张应是「同一产品的不同角度」(正面/侧面/背面/logo特写)。
+# 太多会撑大请求体且并不会更准，2-4 张通常最佳。
+MAX_PRODUCT_IMAGES = 6
+
+
 def _product_images(cfg: TaskConfig) -> list[str]:
     """brief.product_images：用户真实商品图（对所有分镜生效，保证推销的是真实那款货）。
 
-    路径可写绝对路径、相对仓库根、或 media/refs 下的文件名。
+    路径可写绝对路径、相对仓库根、或 media/refs 下的文件名；最多取 MAX_PRODUCT_IMAGES 张。
     """
     raw = cfg.get("brief", "product_images", default=None)
     if not raw:
@@ -226,6 +231,9 @@ def _product_images(cfg: TaskConfig) -> list[str]:
             if c.exists():
                 out.append(str(c))
                 break
+    if len(out) > MAX_PRODUCT_IMAGES:
+        _log(f"  商品参考图 {len(out)} 张超过上限，只取前 {MAX_PRODUCT_IMAGES} 张")
+        out = out[:MAX_PRODUCT_IMAGES]
     return out
 
 
