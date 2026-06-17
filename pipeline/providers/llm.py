@@ -137,7 +137,15 @@ def _focus_directive(cfg: TaskConfig) -> str:
         "NARRATION STYLE: write each scene's narration as ONE short, natural spoken sentence that plainly "
         "tells the sourcing buyer what they are seeing and the capability it proves (concrete, not vague "
         "slogans). Keep all scenes a similar narration length so pacing is even — never one long monologue "
-        "scene and one near-empty scene."
+        "scene and one near-empty scene.\n"
+        "FIXED FREE-SAMPLE CTA (HARD REQUIREMENT — the ending NEVER changes): the FINAL scene's narration "
+        "AND the script-level cta AND that scene's on_screen_text must ALL be a free-sampling lead-gen call: "
+        "tell the buyer to FILL OUT THE FORM / message us with the item they want, and we will send them a "
+        "FREE SAMPLE so they can check the quality and see the result in their own hands before placing any "
+        "real order. Frame it as zero-risk: free sample, no upfront payment, judge the quality yourself. Do "
+        "NOT end on a vague 'DM us / contact us / inquiry' — it MUST land on 'fill the form → get a free "
+        "sample → see the quality for yourself'. Write it naturally in the target language, short and "
+        "punchy. (decisive_trigger / cta in the strategy should reflect this free-sample offer too.)"
     )
 
 
@@ -240,39 +248,73 @@ def _strategy_fallback(cfg: TaskConfig) -> dict:
     }
 
 
-def generate_strategy(cfg: TaskConfig, secrets: Secrets, mem: dict | None = None) -> dict:
-    """先让 LLM 当买家画像专家/创意总监想清楚策略，再用它指导写脚本。"""
-    if not secrets.llm_api_key:
-        return _strategy_fallback(cfg)
+def _models(secrets: Secrets) -> list[str]:
+    """主模型 + 备用模型（gpt-5.5 过载时自动降级到 gemini-3.5-flash）。"""
+    out = [secrets.llm_model]
+    fb = (secrets.llm_model_fallback or "").strip()
+    if fb and fb != secrets.llm_model:
+        out.append(fb)
+    return [m for m in out if m]
+
+
+def _complete_json(secrets: Secrets, messages: list, temperature: float,
+                   validate, tries_per_model: int = 4) -> dict:
+    """调用 LLM 拿 JSON：每个模型耐心重试(退避)，主模型连续失败后自动切备用模型。
+
+    validate(data)->bool 校验返回字段是否完整；不完整也当失败继续重试/换模型。
+    所有模型都失败才抛错。
+    """
     from openai import OpenAI
 
     client = OpenAI(
         api_key=secrets.llm_api_key, base_url=secrets.llm_base_url or None, timeout=120.0
     )
+    models = _models(secrets)
+    last_exc: Exception | None = None
+    for mi, model in enumerate(models):
+        for attempt in range(1, tries_per_model + 1):
+            try:
+                try:
+                    resp = client.chat.completions.create(
+                        model=model, messages=messages, temperature=temperature,
+                        response_format={"type": "json_object"},
+                    )
+                except Exception:  # noqa: BLE001 - 部分兼容端不支持 response_format
+                    resp = client.chat.completions.create(
+                        model=model, messages=messages, temperature=temperature,
+                    )
+                data = _parse_json(resp.choices[0].message.content or "{}")
+                if not validate(data):
+                    raise ValueError("LLM 返回 JSON 不完整/缺字段")
+                return data
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                print(f"[llm] 模型[{model}] 第 {attempt}/{tries_per_model} 次失败: {exc}",
+                      flush=True)
+                if attempt < tries_per_model:
+                    time.sleep(min(30, 5 * attempt))   # 过载等瞬时错误：耐心退避重试
+        if mi < len(models) - 1:
+            print(f"[llm] 主模型[{model}]连续失败，自动降级到备用模型[{models[mi + 1]}]…",
+                  flush=True)
+    raise RuntimeError(f"LLM 所有模型({models})均调用失败") from last_exc
+
+
+def generate_strategy(cfg: TaskConfig, secrets: Secrets, mem: dict | None = None) -> dict:
+    """先让 LLM 当买家画像专家/创意总监想清楚策略，再用它指导写脚本。"""
+    if not secrets.llm_api_key:
+        return _strategy_fallback(cfg)
     messages = [
         {"role": "system", "content": _STRATEGY_SYSTEM},
         {"role": "user", "content": _strategy_user_prompt(cfg, mem)},
     ]
-    for attempt in range(1, 4):
-        try:
-            try:
-                resp = client.chat.completions.create(
-                    model=secrets.llm_model, messages=messages, temperature=0.8,
-                    response_format={"type": "json_object"},
-                )
-            except Exception:  # noqa: BLE001
-                resp = client.chat.completions.create(
-                    model=secrets.llm_model, messages=messages, temperature=0.8,
-                )
-            data = _parse_json(resp.choices[0].message.content or "{}")
-            if data.get("buyer_persona") or data.get("hook_angle"):
-                return data
-            raise ValueError("策略 JSON 缺字段")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[llm] 策略生成第 {attempt}/3 次失败: {exc}", flush=True)
-            if attempt < 3:
-                time.sleep(2 * attempt)
-    return _strategy_fallback(cfg)
+    try:
+        return _complete_json(
+            secrets, messages, 0.8,
+            validate=lambda d: bool(d.get("buyer_persona") or d.get("hook_angle")),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[llm] 策略生成全部失败，回退模板策略: {exc}", flush=True)
+        return _strategy_fallback(cfg)
 
 
 def _available_refs() -> list[str]:
@@ -401,44 +443,21 @@ def _template_fallback(cfg: TaskConfig) -> Script:
                   scenes=scenes, template_used=used)
 
 
-def _call_llm(cfg: TaskConfig, secrets: Secrets, retries: int = 3,
+def _call_llm(cfg: TaskConfig, secrets: Secrets,
               strategy: dict | None = None, mem: dict | None = None) -> Script:
-    from openai import OpenAI
-
-    client = OpenAI(
-        api_key=secrets.llm_api_key, base_url=secrets.llm_base_url or None, timeout=120.0
-    )
     messages = [
         {"role": "system", "content": _SYSTEM},
         {"role": "user", "content": _user_prompt(cfg, strategy, mem)},
     ]
-    last_exc: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            try:
-                resp = client.chat.completions.create(
-                    model=secrets.llm_model, messages=messages, temperature=0.9,
-                    response_format={"type": "json_object"},
-                )
-            except Exception:  # noqa: BLE001 - 部分兼容端不支持 response_format
-                resp = client.chat.completions.create(
-                    model=secrets.llm_model, messages=messages, temperature=0.9,
-                )
-            data = _parse_json(resp.choices[0].message.content or "{}")
-            if not data.get("scenes"):
-                raise ValueError("LLM 未返回 scenes")
-            data.setdefault("template", cfg.template)
-            data.setdefault("language", cfg.language)
-            pinned = (cfg.get("viral_template", default="auto") or "auto").strip().lower()
-            if templates.get(pinned):
-                data.setdefault("template_used", pinned)
-            return Script.from_dict(data)
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            print(f"[llm] 第 {attempt}/{retries} 次调用失败: {exc}")
-            if attempt < retries:
-                time.sleep(2 * attempt)
-    raise RuntimeError(f"LLM 连续 {retries} 次调用失败") from last_exc
+    data = _complete_json(
+        secrets, messages, 0.9, validate=lambda d: bool(d.get("scenes")),
+    )
+    data.setdefault("template", cfg.template)
+    data.setdefault("language", cfg.language)
+    pinned = (cfg.get("viral_template", default="auto") or "auto").strip().lower()
+    if templates.get(pinned):
+        data.setdefault("template_used", pinned)
+    return Script.from_dict(data)
 
 
 def generate_script(cfg: TaskConfig, secrets: Secrets,

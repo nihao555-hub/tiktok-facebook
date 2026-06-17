@@ -31,6 +31,17 @@ NO_FACE_SUFFIX = (
     "or frame so the face is out of shot. No identifiable face looking at the camera."
 )
 
+# 有用户真实商品参考图时：商品必须 1:1 还原，绝不变形/重设计（这样推销的是用户真实那款货）
+PRODUCT_FIDELITY_SUFFIX = (
+    " IMPORTANT — PRODUCT FIDELITY: the product shown MUST be the EXACT SAME product as in the "
+    "reference image(s). Reproduce it faithfully and identically: same shape, silhouette, "
+    "proportions, size ratio, color, material, finish, texture, buttons, ports, logo, branding "
+    "and any printed text. Do NOT redesign, restyle, beautify, reshape, warp, stretch, melt, "
+    "bend or distort the product, and do NOT invent a different-looking variant. You may only "
+    "change the background, scene, environment, lighting, camera angle and the way it is held or "
+    "placed. The product itself stays pixel-faithful to the reference."
+)
+
 
 @dataclass
 class ImageResult:
@@ -109,11 +120,13 @@ def generate_image(
     ref_images: list[str] | None = None,
     realism: bool = True,
     avoid_frontal_face: bool = True,
+    preserve_product: bool = True,
     progress: Callable[[str], None] | None = None,
 ) -> ImageResult:
     """生成一张图片并下载到本地，返回本地路径 + grsai 托管 URL。
 
     avoid_frontal_face=True 时追加"不出正脸"约束（show_face 的分镜应传 False）。
+    preserve_product=True 且传入参考图时，追加"商品 1:1 还原不变形"硬约束。
     """
     if not secrets.grsai_api_key:
         raise RuntimeError("缺少 GRSAI_API_KEY（gpt-image-2）")
@@ -131,6 +144,8 @@ def generate_image(
     full_prompt = prompt
     if avoid_frontal_face:
         full_prompt += NO_FACE_SUFFIX
+    if urls and preserve_product:
+        full_prompt += PRODUCT_FIDELITY_SUFFIX
     if realism:
         full_prompt += REALISM_SUFFIX
     payload: dict = {

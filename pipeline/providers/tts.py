@@ -34,9 +34,9 @@ _EDGE_VOICE_BY_LANG = {
 _EDGE_ONLY_LANGS = {"th", "lo", "km", "my"}
 
 
-def _edge_voice(cfg: TaskConfig, secrets: Secrets) -> str:
+def _edge_voice(cfg: TaskConfig, secrets: Secrets, lang: str | None = None) -> str:
     """优先 config.yaml 的 tts.voice；否则按目标语言选原生音色；都没有再退回 secrets。"""
-    code = (cfg.language or "en").strip().lower()[:2]
+    code = (lang or cfg.language or "en").strip().lower()[:2]
     cfg_voice = (cfg.get("tts", "voice", default="") or "").strip()
     if cfg_voice:
         return cfg_voice
@@ -49,31 +49,37 @@ def _edge_voice(cfg: TaskConfig, secrets: Secrets) -> str:
     return _EDGE_VOICE_BY_LANG.get(key, _EDGE_VOICE_BY_LANG.get(code, configured or "en-US-AriaNeural"))
 
 
-def synth(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets) -> Path:
+def synth(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets,
+          lang: str | None = None) -> Path:
+    """合成一句配音。lang 可覆盖配音语言（如中文配音 lang="zh"），不传则用 cfg.language。"""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     provider = (secrets.tts_provider or "edge").lower()
-    code = (cfg.language or "en").strip().lower()[:2]
+    code = (lang or cfg.language or "en").strip().lower()[:2]
     # 泰语等：ElevenLabs/OpenAI 英文音色会“硬念”成乱码 -> 强制走原生 EdgeTTS 泰语音色
     if code in _EDGE_ONLY_LANGS and provider in ("elevenlabs", "openai"):
         print(f"  [TTS] {code} 语言不走 {provider}（会念成乱码），改用原生 EdgeTTS 音色", flush=True)
         provider = "edge"
     if provider == "edge":
-        return _edge(text, out_path, cfg, secrets)
+        return _edge(text, out_path, cfg, secrets, lang=code)
     if provider == "openai":
         return _openai(text, out_path, secrets)
     if provider == "elevenlabs":
-        return _elevenlabs(text, out_path, secrets)
+        # 中文配音可用 tts.voice_zh 指定中文音色；否则沿用 tts.voice / secrets.tts_voice
+        override = (cfg.get("tts", "voice_zh", default="") if code == "zh"
+                    else cfg.get("tts", "voice", default="")) or ""
+        return _elevenlabs(text, out_path, secrets, voice_override=override.strip() or None)
     if provider == "azure":
         return _azure(text, out_path, cfg, secrets)
     raise ValueError(f"未知 TTS_PROVIDER={provider}")
 
 
-def _edge(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets) -> Path:
+def _edge(text: str, out_path: Path, cfg: TaskConfig, secrets: Secrets,
+          lang: str | None = None) -> Path:
     import edge_tts
 
     rate = cfg.get("tts", "rate", default="+0%")
     volume = cfg.get("tts", "volume", default="+0%")
-    voice = _edge_voice(cfg, secrets)
+    voice = _edge_voice(cfg, secrets, lang=lang)
     mp3 = out_path.with_suffix(".mp3")
 
     async def _go() -> None:
@@ -119,10 +125,11 @@ def _openai(text: str, out_path: Path, secrets: Secrets) -> Path:
     return mp3
 
 
-def _elevenlabs(text: str, out_path: Path, secrets: Secrets) -> Path:
+def _elevenlabs(text: str, out_path: Path, secrets: Secrets,
+                voice_override: str | None = None) -> Path:
     import requests
 
-    voice = secrets.tts_voice or "21m00Tcm4TlvDq8ikWAM"
+    voice = voice_override or secrets.tts_voice or "21m00Tcm4TlvDq8ikWAM"
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
     payload = {
         "text": text,

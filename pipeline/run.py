@@ -34,6 +34,9 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
     audio_dir.mkdir(parents=True, exist_ok=True)
     scenes = script.scenes
     n = len(scenes)
+    # 配音语言：tts.voice_lang 可选 th(泰语、EdgeTTS)/zh(中文、ElevenLabs)；不填则跟随 cfg.language
+    voice_lang = (cfg.get("tts", "voice_lang", default="") or cfg.language or "en").strip().lower()[:2]
+    voice_zh = voice_lang == "zh"
 
     def _tts_one(s) -> tuple[int, Path, float]:
         existing = (audio_dir / f"a_{s.index:02d}").with_suffix(".mp3")
@@ -41,13 +44,19 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
             dur = ff.duration(existing)
             print(f"  [配音 {s.index + 1}/{n}] 复用 {dur:.1f}s", flush=True)
             return s.index, existing, dur
-        ap = tts.synth(s.narration, audio_dir / f"a_{s.index:02d}", cfg, secrets)
+        # 中文配音念 narration_zh，其余语言念 narration（中文为空则回退原文+原语言，避免空音频/串语种）
+        if voice_zh and s.narration_zh.strip():
+            text, lang = s.narration_zh, "zh"
+        else:
+            text, lang = s.narration, (cfg.language or "en").strip().lower()[:2]
+        ap = tts.synth(text, audio_dir / f"a_{s.index:02d}", cfg, secrets, lang=lang)
         dur = ff.duration(ap)
         print(f"  [配音 {s.index + 1}/{n}] 完成 {dur:.1f}s", flush=True)
         return s.index, ap, dur
 
-    # ElevenLabs 低层套餐并发上限低，限 2；EdgeTTS 等免费接口可放宽
-    tts_workers = 2 if (secrets.tts_provider or "edge").lower() == "elevenlabs" else 4
+    # ElevenLabs 低层套餐并发上限低，限 2；EdgeTTS 等免费接口可放宽（泰语强制走 edge）
+    uses_eleven = (secrets.tts_provider or "edge").lower() == "elevenlabs" and voice_lang not in tts._EDGE_ONLY_LANGS
+    tts_workers = 2 if uses_eleven else 4
     by_idx: dict[int, tuple[Path, float]] = {}
     with ThreadPoolExecutor(max_workers=min(n, tts_workers)) as ex:
         for idx, ap, dur in ex.map(_tts_one, scenes):
@@ -68,30 +77,35 @@ def _prepare_assets(script: Script, cfg: TaskConfig, secrets: Secrets, work: Pat
 
     words: list[tuple[float, float, str]] = []
     words2: list[tuple[float, float, str]] = []
+    sub_main_lang = cfg.language
     if cfg.get("subtitles", "enabled", default=True):
         sub = cfg.get("subtitles", default={}) or {}
-        if subtitles.is_nospace(cfg.language):
+        # 字幕语言模式：bilingual(中泰双语)/zh(单中文)/th或main(单目标语言)；兑容旧 bilingual:true
+        mode = str(sub.get("lang_mode") or ("bilingual" if sub.get("bilingual") else "main")).strip().lower()
+        sub_main_lang = "zh" if mode == "zh" else cfg.language
+        main_field = "narration_zh" if mode == "zh" else "narration"
+        if subtitles.is_nospace(sub_main_lang):
             # 泰/中/日等：用脚本原文做字幕（whisper 对无空格语言易转写出错）
-            words = subtitles.words_from_script(script.scenes, narr_durs)
+            words = subtitles.words_from_script(script.scenes, narr_durs, field=main_field)
         else:
             words = subtitles.transcribe_words(
-                voice, sub.get("whisper_model", "small"), cfg.language
+                voice, sub.get("whisper_model", "small"), sub_main_lang
             )
         # 中泰双语：第二行中文辅助字幕（取脚本里每个分镜的 narration_zh）
-        if sub.get("bilingual", False) and any(s.narration_zh.strip() for s in scenes):
+        if mode == "bilingual" and any(s.narration_zh.strip() for s in scenes):
             words2 = subtitles.words_from_script(script.scenes, narr_durs, field="narration_zh")
-    return base, voice, words, words2
+    return base, voice, words, words2, sub_main_lang
 
 
 def _render_variant(base: Path, words, total, cfg, out: Path, work: Path,
                     hook: str, cta: str, bgm_override: str | None,
-                    words2: list | None = None) -> Path:
+                    words2: list | None = None, main_lang: str | None = None) -> Path:
     fontsdir = None
     ass = None
     if cfg.get("subtitles", "enabled", default=True):
         ass_path = work / f"{out.stem}.ass"
         ass, fontsdir = subtitles.render_ass(
-            words, total, cfg, ass_path, hook=hook, cta=cta, words2=words2)
+            words, total, cfg, ass_path, hook=hook, cta=cta, words2=words2, main_lang=main_lang)
     if ass is None:
         # 没字幕也要能出片：用一个空 ASS
         ass_path = work / f"{out.stem}.ass"
@@ -162,13 +176,14 @@ def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool,
           f"爆款结构=[{script.template_used or 'auto'}]{tpl_name}，hook=\"{script.hook}\"", flush=True)
     _print_script(script)
 
-    base, voice, words, words2 = _prepare_assets(script, cfg, secrets, work)
+    base, voice, words, words2, sub_main_lang = _prepare_assets(script, cfg, secrets, work)
     total = ff.duration(base)
     print(f"[2/5] 底片+配音就绪：{total:.1f}s")
 
     results: list[Path] = []
     final = _render_variant(base, words, total, cfg, outdir / "final.mp4", work,
-                            hook=script.hook, cta=script.cta, bgm_override=None, words2=words2)
+                            hook=script.hook, cta=script.cta, bgm_override=None,
+                            words2=words2, main_lang=sub_main_lang)
     results.append(final)
     print(f"[3/5] 主成片：{final}")
 
@@ -179,12 +194,14 @@ def build(cfg: TaskConfig, secrets: Secrets, outdir: Path, do_capcut: bool,
     for hk in hooks:
         vi += 1
         out = outdir / f"variant_{vi:02d}_hook.mp4"
-        _render_variant(base, words, total, cfg, out, work, hook=hk, cta=script.cta, bgm_override=None, words2=words2)
+        _render_variant(base, words, total, cfg, out, work, hook=hk, cta=script.cta,
+                        bgm_override=None, words2=words2, main_lang=sub_main_lang)
         results.append(out)
     for bg in bgms:
         vi += 1
         out = outdir / f"variant_{vi:02d}_bgm.mp4"
-        _render_variant(base, words, total, cfg, out, work, hook=script.hook, cta=script.cta, bgm_override=bg, words2=words2)
+        _render_variant(base, words, total, cfg, out, work, hook=script.hook, cta=script.cta,
+                        bgm_override=bg, words2=words2, main_lang=sub_main_lang)
         results.append(out)
     if vi:
         print(f"[4/5] A/B 多版本：{vi} 条")

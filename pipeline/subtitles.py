@@ -337,6 +337,7 @@ def render_ass(
     hook: str = "",
     cta: str = "",
     words2: list[tuple[float, float, str]] | None = None,
+    main_lang: str | None = None,
 ) -> tuple[Path, str | None]:
     """从词级时间戳渲染原生风格 ASS（A/B 多版本复用同一份 words，只换 hook/cta）。
 
@@ -345,12 +346,22 @@ def render_ass(
     - 钩子：纯白粗体大字+厚黑描边(无彩色色块)，上三分之一，前 ~2.6s；
     - CTA：左下角 TikTok 红圆角按钮样式(模拟原生购物按钮)，结尾 ~4.5s 弹入。
     - words2：可选第二语言（中泰双语时=中文），渲染成主字幕正下方一行更小的辅助字幕。
+    - main_lang：主字幕语言（不传=cfg.language）；为中文(zh)时主字幕自动切到 CJK 字体。
     尺寸/边距按分辨率自适应(基准 720x1280)。
     """
     sub = cfg.get("subtitles", default={}) or {}
-    nospace = _is_nospace(cfg.language)
+    main_lang_eff = (main_lang or cfg.language or "").strip().lower()
+    nospace = _is_nospace(main_lang_eff)
+    main_is_zh = main_lang_eff.startswith("zh")
 
     font_name, fontsdir = _font_setup(sub.get("font", "assets/fonts/Montserrat-Bold.ttf"))
+    zh_font = sub.get("zh_font", "WenQuanYi Zen Hei")
+    # 主字幕：语言为中文时改用 CJK 字体（系统 WenQuanYi，libass 经 fontconfig 解析）。
+    cap_font_name = zh_font if main_is_zh else font_name
+    # Hook/CTA 大字跟随脚本语言(cfg.language)：脚本为中文时用 CJK 字体，否则用目标语(泰/英)字体，
+    # 避免中文被泰文字体出豆腐块、或泰文被 CJK 字体出豆腐块。
+    script_is_zh = (cfg.language or "").strip().lower().startswith("zh")
+    deco_font_name = zh_font if script_is_zh else font_name
     w, h = cfg.width, cfg.height
     sf = w / 720.0   # 横向缩放因子
     hf = h / 1280.0  # 纵向缩放因子
@@ -399,10 +410,10 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 {fmt}
-Style: Caps,{font_name},{cap_sz},{white},{accent},{black},{shadow_c},1,0,0,0,100,100,0,0,1,{cap_out},{cap_sh},2,60,60,{cap_mv},1
+Style: Caps,{cap_font_name},{cap_sz},{white},{accent},{black},{shadow_c},1,0,0,0,100,100,0,0,1,{cap_out},{cap_sh},2,60,60,{cap_mv},1
 Style: Sub2,{sub2_font_name},{sub2_sz},{white},{white},{black},{shadow_c},0,0,0,0,100,100,0,0,1,{sub2_out},{cap_sh},2,60,60,{sub2_mv},1
-Style: Hook,{font_name},{hook_sz},{white},{white},{black},{shadow_c},1,0,0,0,100,100,0,0,1,{hook_out},{cap_sh},8,70,70,{hook_mv},1
-Style: Cta,{font_name},{cta_sz},{white},{white},{cta_red},&H00000000,1,0,0,0,100,100,0,0,3,{cta_pad},0,2,{cta_ml},60,{cta_mv},1
+Style: Hook,{deco_font_name},{hook_sz},{white},{white},{black},{shadow_c},1,0,0,0,100,100,0,0,1,{hook_out},{cap_sh},8,70,70,{hook_mv},1
+Style: Cta,{deco_font_name},{cta_sz},{white},{white},{cta_red},&H00000000,1,0,0,0,100,100,0,0,3,{cta_pad},0,2,{cta_ml},60,{cta_mv},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

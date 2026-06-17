@@ -208,8 +208,29 @@ def _default_refs(limit: int = 4) -> list[str]:
     return [str(p) for p in imgs[:limit]]
 
 
-def _resolve_refs(scene: Scene) -> list[str]:
-    """分镜指定了 ref_images 用指定的；否则用 media/refs 里的真实素材兜底。"""
+def _product_images(cfg: TaskConfig) -> list[str]:
+    """brief.product_images：用户真实商品图（对所有分镜生效，保证推销的是真实那款货）。
+
+    路径可写绝对路径、相对仓库根、或 media/refs 下的文件名。
+    """
+    raw = cfg.get("brief", "product_images", default=None)
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    out: list[str] = []
+    for name in raw:
+        p = Path(str(name))
+        cands = [p] if p.is_absolute() else [REPO_ROOT / name, _refs_dir() / name]
+        for c in cands:
+            if c.exists():
+                out.append(str(c))
+                break
+    return out
+
+
+def _resolve_refs(scene: Scene, product_images: list[str] | None = None) -> list[str]:
+    """优先级：分镜指定 ref_images > brief.product_images（真实商品图）> media/refs 兜底。"""
     if scene.ref_images:
         out = []
         for name in scene.ref_images:
@@ -220,6 +241,8 @@ def _resolve_refs(scene: Scene) -> list[str]:
                 out.append(str(p))
         if out:
             return out
+    if product_images:
+        return product_images
     return _default_refs()
 
 
@@ -271,7 +294,8 @@ def _wuyin_poll(task_id: str, secrets: Secrets,
 
 
 def _animate_scene(s: Scene, image_url: str, want: int, w: int, h: int,
-                   secrets: Secrets, n: int, tries: int = 3) -> str:
+                   secrets: Secrets, n: int, tries: int = 3,
+                   prompt_suffix: str = "") -> str:
     """提交无垠视频生成；失败自动重试。返回视频 URL（全部失败则抛错）。
 
     两类失败区别处理：
@@ -280,8 +304,12 @@ def _animate_scene(s: Scene, image_url: str, want: int, w: int, h: int,
 
     有首帧图时走图生视频（image_url 非空）；首帧出图失败时退化为文生视频，
     此时把画面描述拼进 prompt，让 Veo 没有首帧也能生成真实工厂镜头。
+
+    prompt_suffix：传入真实商品图时追加"运镜中商品保持一致不变形"约束。
     """
     base = s.mov_prompt if image_url else f"{s.img_prompt}. {s.mov_prompt}".strip()
+    if prompt_suffix:
+        base = f"{base}{prompt_suffix}"
     variants = [
         (base, "原始运镜"),
         (_soften_prompt(base, 1), "软化运镜(去敏感词)"),
@@ -327,6 +355,15 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
     vid_seconds = int(cfg.get("clipgen", "video_seconds", default=10))
     vid_tries = max(1, int(cfg.get("clipgen", "video_retries", default=3)))
     img_tries = max(1, int(cfg.get("clipgen", "image_retries", default=2)))
+    product_imgs = _product_images(cfg)
+    keep_product = bool(cfg.get("clipgen", "preserve_product", default=True))
+    mov_suffix = (
+        " Keep the product perfectly consistent and rigid throughout the motion: do NOT morph, "
+        "warp, melt, reshape or change its color/logo/proportions — only the camera, light and "
+        "surroundings move."
+    ) if (product_imgs and keep_product) else ""
+    if product_imgs:
+        _log(f"  使用真实商品图（{len(product_imgs)} 张）做图生图，强约束商品 1:1 不变形")
     img_dir = workdir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
     scenes = script.scenes
@@ -348,7 +385,8 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
                      f"（show_face={s.show_face}，第{attempt}/{img_tries}次）")
                 img = imagegen.generate_image(
                     s.img_prompt, img_path, secrets, width=w, height=h,
-                    ref_images=_resolve_refs(s), avoid_frontal_face=not s.show_face,
+                    ref_images=_resolve_refs(s, product_imgs),
+                    avoid_frontal_face=not s.show_face, preserve_product=keep_product,
                     progress=lambda p: _log(f"  [图 {s.index + 1}/{n}] 出图 {p}"))
                 _log(f"  [图 {s.index + 1}/{n}] 出图完成 -> 进入图生视频")
                 break
@@ -361,7 +399,8 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
             _log(f"  [图 {s.index + 1}/{n}] 出图最终失败，改用文生视频（无首帧）兜底")
         want = max(vid_seconds, int(math.ceil(s.seconds)))
         try:
-            video_url = _animate_scene(s, image_url, want, w, h, secrets, n, tries=vid_tries)
+            video_url = _animate_scene(s, image_url, want, w, h, secrets, n,
+                                       tries=vid_tries, prompt_suffix=mov_suffix)
             raw = workdir / f"raw_{s.index:02d}.mp4"
             _download(video_url, raw)
             delogo = _wm_delogo_box(raw) if strip_wm else None

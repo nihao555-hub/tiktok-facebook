@@ -24,6 +24,8 @@ class Secrets:
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+    # 主模型连续失败(如过载)时自动降级到的备用模型
+    llm_model_fallback: str = "gemini-3.5-flash"
 
     # 文生图/图生图 (grsai gpt-image-2)
     image_provider: str = "grsai"
@@ -63,6 +65,7 @@ class Secrets:
             llm_api_key=_env("LLM_API_KEY"),
             llm_base_url=_env("LLM_BASE_URL", "https://api.openai.com/v1"),
             llm_model=_env("LLM_MODEL", "gpt-4o-mini"),
+            llm_model_fallback=_env("LLM_MODEL_FALLBACK", "gemini-3.5-flash"),
             image_provider=_env("IMAGE_PROVIDER", "grsai"),
             grsai_api_key=_env("GRSAI_API_KEY") or _env("LLM_API_KEY"),
             grsai_base_url=_env("GRSAI_BASE_URL", "https://grsaiapi.com"),
