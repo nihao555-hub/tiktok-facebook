@@ -461,62 +461,95 @@ def _creative_user_prompt(cfg: TaskConfig, strategy: dict | None = None) -> str:
 
 
 def _creative_fallback(cfg: TaskConfig, strategy: dict | None = None) -> Script:
-    """无 LLM key 时的确定性创意脚本：按抽到的轴组合 + 通用骨架拼一版可跑通的脚本。"""
+    """无 LLM key 时的确定性创意脚本：按抽到的轴组合 + 通用骨架拼一版可跑通的脚本。
+
+    按 creative.scene_count / target_seconds 伸缩出 8-14 个分镜，把卖点编进
+    "升级反转"的中段，凑出目标时长（可跑出 ~1 分钟的完整叙事）。"""
     brief = cfg.get("brief", default={}) or {}
     name = brief.get("product_name", "this brand")
-    cta = brief.get("cta", "618 抢先下单 🔗")
-    sp = (brief.get("selling_points") or [name])[0]
+    cta = brief.get("cta", "现在下单 🔗")
+    sps = [s for s in (brief.get("selling_points") or []) if s] or [name]
     combo = _creative_combo(strategy)
+    zh = (cfg.language or "").lower().startswith("zh")
 
     def opt(axis: str) -> dict:
         return creative_engine.get_option(axis, combo.get(axis, "")) or {}
 
+    def lab(d: dict) -> str:
+        return (d.get("zh") if zh else (d.get("en") or d.get("zh"))) or ""
+
     w, spc, rev = opt("world"), opt("spectacle"), opt("reversal")
     met, tr, nar = opt("metaphor"), opt("transition"), opt("narration")
+
+    n = int(cfg.get("creative", "scene_count",
+                    default=cfg.get("clipgen", "scene_count", default=10)) or 10)
+    n = max(8, min(n, 14))
+    target = max(30, int(cfg.target_seconds or 60))
+
+    # (旁白, 屏幕大字, 出图提示, 运镜提示, 是否出脸)
+    beats: list[tuple[str, str, str, str, bool]] = []
+    beats.append((
+        (f"{lab(spc)}——第一秒，眼前就发生了不可能的事。" if zh
+         else f"{lab(spc)} — in the very first second, the impossible happens."),
+        lab(spc),
+        f"cinematic film still, {w.get('en', '')}, {spc.get('en', '')}, dramatic key light",
+        "fast dramatic push-in revealing the impossible spectacle", True))
+    beats.append((
+        (f"欢迎来到「{lab(w)}」的世界，规则，从这里开始被改写。" if zh
+         else f"Welcome to a world of {w.get('en', '')}. The rules start to break here."),
+        lab(w),
+        f"cinematic wide establishing shot of {w.get('en', '')}, epic volumetric lighting",
+        "sweeping crane shot establishing the world", True))
+
+    mid = n - 5  # 中段反转 + 卖点（其余 5 个是 hook/world/climax/transition/cta）
+    for i in range(mid):
+        spi = sps[i % len(sps)]
+        if i % 2 == 0:
+            txt = (f"{lab(rev)}——你以为的，全错了。这一回，关键在「{spi}」。" if zh
+                   else f"{lab(rev)} — everything you assumed is wrong. This time it's about {spi}.")
+            ost, img = lab(rev), f"cinematic still, dramatic reversal, {rev.get('en', '')}, intense mood"
+            mot = "whip pan into the reversal, speed ramp"
+        else:
+            txt = (f"赌注再升级：还是靠「{spi}」，把全场逼到极限。" if zh
+                   else f"The stakes escalate: {spi} again, pushed to the absolute limit.")
+            ost = spi
+            img = f"cinematic high-stakes shot dramatizing {met.get('en', '')}, {w.get('en', '')}"
+            mot = "dynamic tracking shot, rising tension"
+        beats.append((txt, ost, img, mot, True))
+
+    beats.append((
+        (f"就在这一刻，{sps[0]}——成了扭转全局的最大反转。" if zh
+         else f"And in this moment, {sps[0]} becomes the biggest twist of all."),
+        sps[0],
+        f"cinematic hero shot, the selling point dramatized as the climax: {met.get('en', '')}",
+        "speed-ramp into the climactic reveal, then a beat of stillness", True))
+    beats.append((
+        (f"{lab(tr)}——原来这整个故事，讲的就是 {name}。" if zh
+         else f"{lab(tr)} — turns out this whole story was {name} all along."),
+        name,
+        f"cinematic match-cut transition into the brand key visual, {tr.get('en', '')}",
+        "seamless match-move from story world into the brand key visual", False))
+    beats.append((
+        f"{name}。{cta}",
+        cta,
+        "clean cinematic brand end card, bold product key visual, brand color, logo",
+        "logo settles, promo text and CTA pop in", False))
+
+    base = target / len(beats)
+    secs = [max(4.0, min(7.5, base)) for _ in beats]
+    factor = target / sum(secs)
+    secs = [round(x * factor, 1) for x in secs]
+
     scenes = [
-        Scene(index=0,
-              narration=f"{spc.get('zh','')}——眼前发生了不可能的事。",
-              narration_zh=f"{spc.get('zh','')}——眼前发生了不可能的事。",
-              on_screen_text=spc.get("zh", ""), seconds=4,
-              image_prompt=f"cinematic film still, {w.get('en','')}, {spc.get('en','')}",
-              motion_prompt="fast dramatic push-in revealing the impossible spectacle",
-              show_face=True),
-        Scene(index=1,
-              narration="在这个世界里，一切悬念才刚刚开始。",
-              narration_zh="在这个世界里，一切悬念才刚刚开始。",
-              on_screen_text="悬念升级", seconds=5,
-              image_prompt=f"cinematic wide shot establishing {w.get('en','')}, epic lighting",
-              motion_prompt="sweeping camera establishing the world", show_face=True),
-        Scene(index=2,
-              narration=f"{rev.get('zh','')}——你以为的，全错了。",
-              narration_zh=f"{rev.get('zh','')}——你以为的，全错了。",
-              on_screen_text=rev.get("zh", ""), seconds=5,
-              image_prompt=f"cinematic still, dramatic reversal moment, {rev.get('en','')}",
-              motion_prompt="whip pan into the reversal", show_face=True),
-        Scene(index=3,
-              narration=f"就在这一刻，{sp}——成了扭转全局的关键。",
-              narration_zh=f"就在这一刻，{sp}——成了扭转全局的关键。",
-              on_screen_text=sp, seconds=6,
-              image_prompt=f"cinematic hero shot, the selling point dramatized: {met.get('en','')}",
-              motion_prompt="speed-ramp into the climactic reveal, then a beat of stillness",
-              show_face=True),
-        Scene(index=4,
-              narration=f"{tr.get('zh','')}——故事，就是这条广告。",
-              narration_zh=f"{tr.get('zh','')}——故事，就是这条广告。",
-              on_screen_text=name, seconds=4,
-              image_prompt=f"cinematic transition into the brand, {tr.get('en','')}",
-              motion_prompt="seamless match-move from story world into the brand key visual",
-              show_face=False),
-        Scene(index=5,
-              narration=cta, narration_zh=cta, on_screen_text=cta, seconds=4,
-              image_prompt="clean cinematic brand end card, bold key visual, brand color",
-              motion_prompt="logo settles, promo text pops in", show_face=False),
+        Scene(index=i, narration=txt, narration_zh=(txt if zh else ""),
+              on_screen_text=ost, seconds=secs[i],
+              image_prompt=img, motion_prompt=mot, show_face=face)
+        for i, (txt, ost, img, mot, face) in enumerate(beats)
     ]
-    hook = spc.get("zh", "") or "等一下…"
-    s = Script(template="creative", language=cfg.language, hook=hook, cta=cta,
-               scenes=scenes, template_used="creative_narrative", hook_category="spectacle")
+    hook = lab(spc) or ("等一下…" if zh else "Wait…")
     _ = nar  # 腔调在有 LLM 时影响台词；兜底脚本保留占位
-    return s
+    return Script(template="creative", language=cfg.language, hook=hook, cta=cta,
+                  scenes=scenes, template_used="creative_narrative", hook_category="spectacle")
 
 
 def _parse_json(content: str) -> dict:
