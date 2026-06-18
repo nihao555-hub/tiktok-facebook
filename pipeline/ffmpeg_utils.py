@@ -44,6 +44,27 @@ def dimensions(path: str | Path) -> tuple[int, int]:
         return 0, 0
 
 
+def last_frame(video: str | Path, dst: str | Path) -> Path:
+    """抽取视频接近结尾的一帧存为图片。
+
+    用于「链式尾帧」连贯：把上一镜的尾帧当作下一镜出图的首帧参考，让相邻镜头在
+    打光/主体/色调上自然顺接。优先用 -sseof 从尾部定位；失败再按时长回退定位。
+    """
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run(["-sseof", "-0.2", "-i", str(video), "-frames:v", "1", "-q:v", "2",
+             "-update", "1", str(dst)])
+    except RuntimeError:
+        dst.unlink(missing_ok=True)
+    if not dst.exists() or dst.stat().st_size < 1024:
+        dur = duration(video)
+        ss = max(0.0, dur - 0.1)
+        run(["-ss", f"{ss}", "-i", str(video), "-frames:v", "1", "-q:v", "2",
+             "-update", "1", str(dst)])
+    return dst
+
+
 def has_audio(path: str | Path) -> bool:
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-select_streams", "a",

@@ -20,7 +20,7 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import brand
+from . import brand, creative_engine
 from . import ffmpeg_utils as ff
 from . import mixer, subtitles, templates
 from .config import REPO_ROOT, Secrets, TaskConfig
@@ -117,6 +117,13 @@ def _render_variant(base: Path, words, total, cfg, out: Path, work: Path,
 
 
 def _print_strategy(strategy: dict) -> None:
+    if strategy.get("creative_combo"):
+        print("[0/5] 创意引擎抽样（防同质化·和历史每条≥N轴不同）：", flush=True)
+        print(f"    🎬 创意组合：{strategy.get('creative_summary', '')}")
+        print(f"    🪝 奇观钩子：{strategy.get('hook_angle', '')}")
+        print(f"    🎯 要演的卖点：{strategy.get('proof_to_show', [])}")
+        print(f"    📲 结尾CTA：{strategy.get('decisive_trigger', '')}", flush=True)
+        return
     bp = strategy.get("buyer_persona") or {}
     print("[0/5] 买家画像 & 策略（gpt-5.5 先当买家画像专家/创意总监思考）：", flush=True)
     print(f"    🎯 买家：{bp.get('who', '')}（{bp.get('role', '')}）| 市场：{strategy.get('market', '')}")
@@ -243,6 +250,8 @@ def main() -> None:
     ap.add_argument("--publish", action="store_true", help="强制发布（覆盖 config 开关）")
     ap.add_argument("--list-templates", action="store_true",
                     help="列出全部爆款通用接口模版后退出")
+    ap.add_argument("--list-creative-axes", action="store_true",
+                    help="列出创意广告引擎的全部变量轴/可选值后退出")
     args = ap.parse_args()
 
     if args.list_templates:
@@ -250,6 +259,10 @@ def main() -> None:
             applies = "/".join(t["applies_to"])
             print(f"[{t['id']}] {t['name']}（{t['name_zh']}） · 适用: {applies}")
             print(f"    {t['best_for']}")
+        return
+
+    if args.list_creative_axes:
+        print(creative_engine.overview())
         return
 
     cfg_path = Path(args.config)

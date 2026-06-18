@@ -2,7 +2,9 @@
 # 两条业务线对应 prompts/factory_persona.md 与 prompts/product_persona.md
 
 project: "demo"
-template: product          # factory | product
+template: product          # factory(B2B工厂) | product(B2C带货) | creative(高概念创意叙事大片)
+                           # creative = 对标京东外卖《星球杯》那类电影感创意广告；详见 docs/CREATIVE_MODE.md
+                           # 创意模式的现成示例配置见 config.creative.example.yaml
 language: en               # 文案/配音语言 (en|th|zh|id|vi|ms...)
                            # 注：泰语 th 请配合 TTS_MODEL=eleven_v3 + 泰文字体 Kanit-Bold.ttf
 
@@ -42,6 +44,17 @@ differentiation:
   recent_window: 6          # 反重复时回看最近几条历史
 brand:
   id: ""                    # 留空=按 brief 自动派生稳定 id；多工厂请各填不同 id 以隔离记忆
+
+# 创意叙事大片模式（template: creative）专用。把卖点演成剧情，6 个变量轴组合成创意，
+# 用代码强制"和历史每条片≥min_axes_different 个轴不同"做防同质化硬保证。
+# 查看全部变量轴：python -m pipeline.run --list-creative-axes
+# 批量产创意：     python -m pipeline.creative_engine --batch 5 --brief
+creative:
+  line: ""                  # 创作线 id（隔离历史，连续跑越跑越不撞款）；留空=用 project
+  min_axes_different: 3     # 和历史每条片至少不同的轴数（防同质化阈值）
+  scene_count: 9           # 创意片镜头数（叙事密、节奏快，建议 8-12）
+  seed:                    # 复现某次随机组合（留空=每次新抽）
+  lock: {}                 # 锁定某些轴其余随机，如 {world: wuxia, spectacle: time_freeze}
 
 # AI 片段生成（每个分镜一段）。
 # CLIPGEN_PROVIDER=wuyinkeji 时：gpt-image-2 出超写实图(吃 media/refs 真实素材) -> 无垠把图动起来

@@ -23,3 +23,6 @@ output/*
 
 # 创意差异化层的品牌记忆（运行期状态）
 brand_memory/
+
+# 创意广告引擎的历史组合（运行期状态，用于防同质化）
+creative_memory/
