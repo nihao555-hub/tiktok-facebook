@@ -254,6 +254,75 @@ def _resolve_refs(scene: Scene, product_images: list[str] | None = None) -> list
     return _default_refs()
 
 
+# --------------------------------------------------------------------------
+# 连贯模式 (chain_frames)：B 锚定同一张产品图 + A 链式尾帧（上一镜尾帧喂下一镜首帧）
+# --------------------------------------------------------------------------
+# 单镜最多带几张参考图：连贯模式下优先级为 上一镜尾帧 > 锚定产品图 > 真实商品图。
+MAX_REFS_PER_SCENE = 4
+
+# 运镜阶段的产品/画面一致性约束（连贯模式或传了真实商品图时追加）。
+_CONSISTENCY_MOV_SUFFIX = (
+    " Keep the product perfectly consistent and rigid throughout the motion: do NOT morph, "
+    "warp, melt, reshape or change its color/logo/proportions — only the camera, light and "
+    "surroundings move."
+)
+
+
+def _merge_refs(extra: list[str], base: list[str], limit: int = MAX_REFS_PER_SCENE) -> list[str]:
+    """合并参考图：extra（尾帧/锚定，连贯优先）在前，base（商品/兜底）在后，去重并截断。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in [*extra, *base]:
+        if r and r not in seen:
+            out.append(r)
+            seen.add(r)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _anchor_prompt(cfg: TaskConfig) -> str:
+    """从 brief 推导出一张「定稿产品 hero 图」的英文提示，做全片锚定（B）。"""
+    brief = cfg.get("brief", default={}) or {}
+    name = brief.get("product_name") or "the product"
+    sps = [s for s in (brief.get("selling_points") or []) if s]
+    sp_txt = ("; conveying: " + ", ".join(sps[:3])) if sps else ""
+    return (
+        f"A single clean cinematic hero product shot of {name}{sp_txt}. "
+        "One product centered in frame, premium studio key light on a simple dark gradient "
+        "background, crisp focus, true colors. This is the CANONICAL reference of the product — "
+        "its exact shape, proportions, color, material, logo and branding must stay identical "
+        "in every later scene."
+    )
+
+
+def _build_anchor(cfg: TaskConfig, secrets: Secrets, img_dir: Path,
+                  w: int, h: int, tries: int = 4) -> str | None:
+    """生成并缓存一张定稿产品图，全片每镜复用做锚定（B）。失败重试，最终失败返回 None。"""
+    dst = img_dir / "anchor_product.png"
+    if dst.exists() and dst.stat().st_size > 4096:
+        _log("  [连贯·B] 复用已有锚定产品图 anchor_product.png")
+        return str(dst)
+    product_imgs = _product_images(cfg)
+    prompt = _anchor_prompt(cfg)
+    for attempt in range(1, max(1, tries) + 1):
+        try:
+            _log(f"  [连贯·B] 生成锚定产品图（第{attempt}/{tries}次）…")
+            imagegen.generate_image(
+                prompt, dst, secrets, width=w, height=h,
+                ref_images=product_imgs or None,
+                avoid_frontal_face=True, preserve_product=bool(product_imgs),
+                progress=lambda p: _log(f"  [连贯·B] 锚定图 {p}"))
+            _log("  [连贯·B] 锚定产品图已生成（全片每镜复用，产品不再漂移）")
+            return str(dst)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"  [连贯·B] 锚定图失败（第{attempt}/{tries}次）：{exc}")
+            if attempt < tries:
+                time.sleep(min(20, 4 * attempt))
+    _log("  [连贯·B] 锚定图最终失败，跳过 B（本片仅靠 A 链式尾帧维持连贯）")
+    return None
+
+
 def _wuyin_submit(prompt: str, image_url: str, w: int, h: int,
                   seconds: int, secrets: Secrets) -> str:
     base = secrets.wuyin_base_url.rstrip("/")
@@ -365,13 +434,10 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
     img_tries = max(1, int(cfg.get("clipgen", "image_retries", default=2)))
     product_imgs = _product_images(cfg)
     keep_product = bool(cfg.get("clipgen", "preserve_product", default=True))
-    mov_suffix = (
-        " Keep the product perfectly consistent and rigid throughout the motion: do NOT morph, "
-        "warp, melt, reshape or change its color/logo/proportions — only the camera, light and "
-        "surroundings move."
-    ) if (product_imgs and keep_product) else ""
+    mov_suffix = _CONSISTENCY_MOV_SUFFIX if (product_imgs and keep_product) else ""
     if product_imgs:
         _log(f"  使用真实商品图（{len(product_imgs)} 张）做图生图，强约束商品 1:1 不变形")
+    chain = bool(cfg.get("clipgen", "chain_frames", default=False))
     img_dir = workdir / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
     scenes = script.scenes
@@ -379,22 +445,26 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
     concurrency = int(cfg.get("clipgen", "concurrency", default=0)) or n
     concurrency = max(1, min(concurrency, n, 6))
 
-    def _one(s: Scene) -> tuple[int, Path]:
+    def _one(s: Scene, extra_refs: list[str] | None = None) -> tuple[int, Path]:
         img_path = img_dir / f"scene_{s.index:02d}.png"
         dst = workdir / f"scene_{s.index:02d}.mp4"
         # --resume：该分镜已生成过就直接复用，省掉重复出图/出视频的钱和时间
         if dst.exists() and dst.stat().st_size > 4096:
             _log(f"  [视频 {s.index + 1}/{n}] 复用已生成片段 -> {dst.name}")
             return s.index, dst
+        # 连贯模式：上一镜尾帧 + 锚定产品图 在前，真实商品/兜底图在后（合并去重截断）
+        refs = _merge_refs(extra_refs or [], _resolve_refs(s, product_imgs))
+        keep = keep_product or bool(extra_refs)  # 有锚定/尾帧时也强约束产品一致
+        suffix = _CONSISTENCY_MOV_SUFFIX if (refs and (extra_refs or (product_imgs and keep_product))) else mov_suffix
         img: imagegen.ImageResult | None = None
         for attempt in range(1, img_tries + 1):
             try:
                 _log(f"  [图 {s.index + 1}/{n}] gpt-image-2 出图中…"
-                     f"（show_face={s.show_face}，第{attempt}/{img_tries}次）")
+                     f"（show_face={s.show_face}，refs={len(refs)}，第{attempt}/{img_tries}次）")
                 img = imagegen.generate_image(
                     s.img_prompt, img_path, secrets, width=w, height=h,
-                    ref_images=_resolve_refs(s, product_imgs),
-                    avoid_frontal_face=not s.show_face, preserve_product=keep_product,
+                    ref_images=refs,
+                    avoid_frontal_face=not s.show_face, preserve_product=keep,
                     progress=lambda p: _log(f"  [图 {s.index + 1}/{n}] 出图 {p}"))
                 _log(f"  [图 {s.index + 1}/{n}] 出图完成 -> 进入图生视频")
                 break
@@ -408,7 +478,7 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
         want = max(vid_seconds, int(math.ceil(s.seconds)))
         try:
             video_url = _animate_scene(s, image_url, want, w, h, secrets, n,
-                                       tries=vid_tries, prompt_suffix=mov_suffix)
+                                       tries=vid_tries, prompt_suffix=suffix)
             raw = workdir / f"raw_{s.index:02d}.mp4"
             _download(video_url, raw)
             delogo = _wm_delogo_box(raw) if strip_wm else None
@@ -423,6 +493,9 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
             _log(f"  [视频 {s.index + 1}/{n}] 兜底完成 -> {dst.name}")
         return s.index, dst
 
+    if chain:
+        return _gen_chain(_one, scenes, cfg, secrets, img_dir, w, h, n)
+
     _log(f"  并发出图/出视频：{n} 个分镜，并发度={concurrency}")
     results: dict[int, Path] = {}
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
@@ -430,6 +503,29 @@ def _gen_wuyinkeji_all(script: Script, cfg: TaskConfig, secrets: Secrets,
         for f in as_completed(futs):
             idx, dst = f.result()
             results[idx] = dst
+    return [results[s.index] for s in scenes]
+
+
+def _gen_chain(one: Callable[[Scene, list[str] | None], tuple[int, Path]],
+               scenes: list[Scene], cfg: TaskConfig, secrets: Secrets,
+               img_dir: Path, w: int, h: int, n: int) -> list[Path]:
+    """连贯模式：串行生成。B 先建一张锚定产品图全片复用；A 每镜抽尾帧喂给下一镜做首帧参考。"""
+    _log("  连贯模式(chain_frames)：串行生成 + B 锚定产品图 + A 链式尾帧（上一镜尾帧→下一镜首帧）")
+    anchor = _build_anchor(cfg, secrets, img_dir, w, h)
+    results: dict[int, Path] = {}
+    prev_tail: str | None = None
+    for s in scenes:
+        extra = [r for r in (prev_tail, anchor) if r]  # 尾帧优先，其次锚定图
+        idx, dst = one(s, extra)
+        results[idx] = dst
+        tail = img_dir / f"tail_{s.index:02d}.png"
+        try:
+            ff.last_frame(dst, tail)
+            if tail.exists() and tail.stat().st_size > 1024:
+                prev_tail = str(tail)
+                _log(f"  [连贯·A] 已抽取第{s.index + 1}镜尾帧 → 作为下一镜首帧参考")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"  [连贯·A] 第{s.index + 1}镜尾帧抽取失败（保留上一尾帧）：{exc}")
     return [results[s.index] for s in scenes]
 
 

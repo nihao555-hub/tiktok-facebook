@@ -78,7 +78,31 @@ python -m pipeline.creative_engine --batch 5 --selling-point "最快分钟级送
 python -m pipeline.creative_engine --batch 3 --lock world=wuxia --seed 42 --no-record
 ```
 
-## 五、和已有"差异化层"的关系
+## 五、镜头连贯（chain_frames）：B 锚定 + A 链式尾帧
+
+默认每个分镜**独立并发**出图，速度快，但相邻镜头的主体/打光/色调会有跳变。想要像一条片子
+一样**前后连贯**，在 `clipgen.chain_frames: true` 打开连贯模式，它会**串行**生成并同时做两件事：
+
+- **B 锚定（同一张产品图）**：开跑前先用 `gpt-image-2` 生成一张「定稿产品 hero 图」（提示词由
+  `brief.product_name` + `selling_points` 推导），缓存为 `_work/images/anchor_product.png`，
+  **全片每个镜头都把它当参考图**喂进去——产品的形状/颜色/logo/比例不再漂移。生成失败会重试，
+  最终失败则自动降级为「只用 A」。若 `brief.product_images` 填了真货，锚定图会以真货为基底。
+- **A 链式尾帧（上一镜尾帧 → 下一镜首帧）**：每个镜头出完视频后，用 ffmpeg 抽它**接近结尾的一帧**
+  （`ffmpeg_utils.last_frame`）存成 PNG，作为**下一个镜头出图的参考图**，让相邻镜头在画面上自然顺接。
+
+每镜参考图优先级：**上一镜尾帧 > 锚定产品图 > 真实商品图 > 兜底图**，最多带 `MAX_REFS_PER_SCENE`（4）张。
+连贯模式下出图/运镜都会自动加上「产品保持刚性、只动镜头与光」的约束，避免产品在运动中变形。
+
+```yaml
+clipgen:
+  chain_frames: true      # 串行 + B 锚定 + A 链式尾帧（更连贯但更慢）
+  preserve_product: true  # 配合 chain 一起开，强约束产品一致
+```
+
+> 取舍：连贯模式是**串行**的（每镜要等上一镜尾帧），比并发慢不少；追求出片速度、不在意镜头间
+> 跳变时关掉即可。两种模式产出的脚本完全一致，差别只在渲染方式。
+
+## 六、和已有"差异化层"的关系
 
 仓库已有的 `brand.py`（品牌母题 + 钩子轮换 + 反重复）服务的是 UGC 带货片（product/factory）。
 创意模式新增的 `creative_engine.py` 是**叙事大片专用**的另一套防同质化引擎：前者保证"同一品牌每条

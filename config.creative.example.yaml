@@ -61,6 +61,9 @@ clipgen:
   video_retries: 3
   image_retries: 2
   preserve_product: false    # 创意片更看重电影感而非 1:1 还原商品；要强约束品牌资产再开
+  chain_frames: false        # 连贯模式：开了就串行生成，并做 B 锚定同一张产品图 + A 上一镜尾帧喂下一镜首帧，
+                             #   让相邻镜头在主体/打光/色调上自然顺接（更连贯但更慢）；
+                             #   关掉=各镜独立并发出图（更快但镜头间会有跳变）
 
 # 平台装饰
 decorate:
