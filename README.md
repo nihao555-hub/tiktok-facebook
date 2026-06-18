@@ -29,6 +29,8 @@
 
 **爆款「通用接口模版」**：12 个被验证过的 TikTok/FB 带货爆款结构（PAS 痛点-放大-解决、前后对比、质疑测评、开箱、悬念循环、清单、POV 故事、对比 PK、教程、解压 ASMR、工厂溯源 B2B、老板出镜 B2B）沉淀成可复用模版，用来**指导 AI 怎么拍**。生成脚本时模版库会作为菜单喂给 LLM：`viral_template: auto` 让 AI 自选最契合的一个结构并在结构内自由发挥（不写死台词，避免同质化），也可钉死某个 id 做 A/B。清单见 [`docs/VIRAL_TEMPLATES.md`](docs/VIRAL_TEMPLATES.md)，机器实现 `pipeline/templates.py`，命令行 `python -m pipeline.run --list-templates` 可查看全部。
 
+**创意叙事大片模式（`template: creative`）**：对标京东外卖《星球杯·黑牌》那类**电影感高概念创意广告**——借一个世界观演一个反转故事，把卖点演成剧情高潮，再从软广丝滑转硬广。配套一台「造创意的机器」`pipeline/creative_engine.py`：把"为什么好看"工程化成 6 个变量轴（世界观 × 违反常识的奇观 × 反转机制 × 卖点视觉隐喻 × 软广转硬广道具 × 解说腔调，组合空间 ≈ 115 万），并用**代码强制"和历史每条片 ≥3 个轴不同"**来做防同质化硬保证（不靠 LLM 自觉）。既能跑完整出片，也能 `python -m pipeline.creative_engine --batch 5 --brief` 单独批量产创意。详见 [`docs/CREATIVE_MODE.md`](docs/CREATIVE_MODE.md)；现成示例配置 `config.creative.example.yaml`；`python -m pipeline.run --list-creative-axes` 查看全部变量轴。
+
 > 内容打法（买家画像 / 痛点公式 / 两套分镜脚本模板 / TikTok·FB 原生形式差异）见 [`docs/STRATEGY.md`](docs/STRATEGY.md)。
 > 流水线里 `prompts/factory_persona.md`（工厂展示·B2B）与 `prompts/product_persona.md`（单品带货·B2C）就是这套打法喂给 LLM 的角色提示。
 
@@ -38,6 +40,7 @@
 pipeline/
   config.py           读取 YAML 任务配置 + .env 密钥
   templates.py        爆款「通用接口模版」库（12 个结构，指导 AI 怎么拍；脚本生成时注入 LLM）
+  creative_engine.py  创意叙事大片引擎（6 变量轴组合 + 代码级防同质化；template: creative）
   script_model.py     分镜脚本数据结构
   providers/
     llm.py            文案/分镜脚本（grsai gpt-5.5；OpenAI 兼容；无 key 用模板兜底）
@@ -51,7 +54,7 @@ pipeline/
     tiktok.py         TikTok Content Posting API
     facebook.py       Facebook Graph API（Reels / Feed）
   run.py              编排 CLI
-prompts/              两条业务线的买家画像/形式指南（喂 LLM）
+prompts/              三条业务线的买家画像/形式指南（喂 LLM；含 creative_persona.md 创意总监）
 media/refs/           放你的真实商品/工厂图（图生图参考；不入库）
 media/clips/          放你的素材（图片/视频）；为空时自动合成占位片段
 media/bgm/            背景音乐

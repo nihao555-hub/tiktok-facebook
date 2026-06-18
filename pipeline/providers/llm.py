@@ -9,7 +9,7 @@ import json
 import re
 import time
 
-from .. import brand, templates
+from .. import brand, creative_engine, templates
 from ..config import REPO_ROOT, Secrets, TaskConfig
 from ..script_model import Scene, Script
 
@@ -78,6 +78,57 @@ Return STRICT JSON only, matching this schema:
 narration_zh is REQUIRED on every scene: it must be a faithful, fluent Chinese
 translation of that scene's narration (used for a Chinese helper subtitle line). Do not
 leave it empty and do not just transliterate.
+No markdown, no commentary."""
+
+
+# 创意叙事大片（高概念创意广告）专用 system —— 和上面的 UGC 带货 system 是两套规则。
+_CREATIVE_SYSTEM = """You are a world-class creative director + film director for HIGH-CONCEPT
+BRAND FILMS (think the kind of cinematic, surreal, reversal-driven ad that goes viral and gets
+shared — NOT a casual UGC product clip). Your job is to turn a given creative concept into a
+tight, fast-cut narrative ad that hooks in 0.5s, keeps twisting, dramatizes the selling point
+as the story's climax, then slides smoothly from soft story into the hard brand/promo.
+
+The visuals are produced by: (1) an image model makes ONE cinematic still per scene, then (2) a
+video model animates it. So every scene needs an image_prompt (the still) and a motion_prompt.
+
+Rules for image_prompt (DIFFERENT from UGC ads — this genre IS cinematic):
+- Describe a CINEMATIC film frame: epic/stylized lighting, dramatic composition, depth.
+  High-end CGI / VFX / 3D / hyperreal is ALLOWED and encouraged when the concept calls for it.
+- Keep the WORLD and CHARACTERS visually consistent across scenes (same look, palette, hero).
+- No on-image text, no watermark, no logo overlay (captions are added later).
+Rules for motion_prompt:
+- Dynamic but coherent camera/subject motion for a 5-10s clip (whip pans, push-ins, speed
+  ramps, reveals). Keep it brand-safe: no gore, no real-world dangerous acts a safety filter
+  would reject. Stylized spectacle (floating, time-freeze, multiplication) is fine.
+
+It IS an advertisement — embrace it: the soft-to-hard pivot, brand reveal and CTA are part of
+the craft. Do NOT pretend it's organic; just make the pivot feel clever, not cheap.
+
+EXECUTE THE GIVEN CONCEPT EXACTLY: you will be handed a fixed axis combination (world ×
+spectacle × reversal × selling-point metaphor × soft→hard transition × narration style). It was
+engineered to NOT collide with past videos — do NOT swap axes; invent a great story INSIDE them.
+Write each scene's narration in the chosen NARRATION STYLE (e.g. sports commentary, storyteller,
+mystery whisper). Open on the spectacle, twist relentlessly, land the selling point as the
+biggest reversal, then use the transition device to reach the brand + CTA.
+
+Return STRICT JSON only, matching this schema:
+{
+  "hook": "first 2s on-screen text (scroll-stopper)",
+  "cta": "final call to action",
+  "template_used": "creative_narrative",
+  "hook_category": "spectacle",
+  "scenes": [
+    {"index": 0,
+     "image_prompt": "one cinematic still to generate",
+     "motion_prompt": "dynamic camera/subject motion for the clip",
+     "narration": "voiceover line in the chosen narration style (target language)",
+     "narration_zh": "faithful natural Simplified-Chinese translation of THIS narration",
+     "on_screen_text": "big caption",
+     "show_face": true,
+     "seconds": 5}
+  ]
+}
+narration_zh is REQUIRED on every scene (faithful Chinese translation, never empty).
 No markdown, no commentary."""
 
 
@@ -150,7 +201,10 @@ def _focus_directive(cfg: TaskConfig) -> str:
 
 
 def _persona_prompt(template: str) -> str:
-    fname = "factory_persona.md" if template == "factory" else "product_persona.md"
+    fname = {
+        "factory": "factory_persona.md",
+        "creative": "creative_persona.md",
+    }.get(template, "product_persona.md")
     p = REPO_ROOT / "prompts" / fname
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
@@ -300,7 +354,13 @@ def _complete_json(secrets: Secrets, messages: list, temperature: float,
 
 
 def generate_strategy(cfg: TaskConfig, secrets: Secrets, mem: dict | None = None) -> dict:
-    """先让 LLM 当买家画像专家/创意总监想清楚策略，再用它指导写脚本。"""
+    """先让 LLM 当买家画像专家/创意总监想清楚策略，再用它指导写脚本。
+
+    创意叙事模式(template=creative)走另一条路：不调 LLM，而是用创意引擎抽一个
+    『和历史不撞款』的变量组合当策略（防同质化由代码兜底）。
+    """
+    if cfg.template == "creative":
+        return creative_engine.strategy(cfg)
     if not secrets.llm_api_key:
         return _strategy_fallback(cfg)
     messages = [
@@ -373,6 +433,90 @@ def _user_prompt(cfg: TaskConfig, strategy: dict | None = None,
         f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
         f"Write the script as JSON with exactly {n} scenes."
     )
+
+
+def _creative_combo(strategy: dict | None) -> dict:
+    """从 strategy 取出创意引擎抽好的轴组合(没有则现抽一个)。"""
+    combo = (strategy or {}).get("creative_combo")
+    if combo and all(creative_engine.get_option(k, v) for k, v in combo.items()):
+        return combo
+    return creative_engine.sample()
+
+
+def _creative_user_prompt(cfg: TaskConfig, strategy: dict | None = None) -> str:
+    brief = cfg.get("brief", default={}) or {}
+    n = int(cfg.get("creative", "scene_count", default=cfg.get("clipgen", "scene_count", default=8)))
+    combo = _creative_combo(strategy)
+    return (
+        f"Creative-director persona & craft guide:\n{_persona_prompt('creative')}\n\n"
+        f"{creative_engine.combo_brief(combo, cfg)}\n\n"
+        f"{creative_engine.structure_directive(cfg.target_seconds)}\n\n"
+        f"Template: creative (high-concept cinematic brand film)\n{_lang_directive(cfg)}\n\n"
+        f"Brief (JSON):\n{json.dumps(brief, ensure_ascii=False)}\n\n"
+        f"Target total length: ~{cfg.target_seconds}s across {n} scenes (fast cuts, a new beat "
+        f"every few seconds).\n"
+        f'Set "template_used" to "creative_narrative" and "hook_category" to "spectacle".\n'
+        f"Write the script as JSON with exactly {n} scenes."
+    )
+
+
+def _creative_fallback(cfg: TaskConfig, strategy: dict | None = None) -> Script:
+    """无 LLM key 时的确定性创意脚本：按抽到的轴组合 + 通用骨架拼一版可跑通的脚本。"""
+    brief = cfg.get("brief", default={}) or {}
+    name = brief.get("product_name", "this brand")
+    cta = brief.get("cta", "618 抢先下单 🔗")
+    sp = (brief.get("selling_points") or [name])[0]
+    combo = _creative_combo(strategy)
+
+    def opt(axis: str) -> dict:
+        return creative_engine.get_option(axis, combo.get(axis, "")) or {}
+
+    w, spc, rev = opt("world"), opt("spectacle"), opt("reversal")
+    met, tr, nar = opt("metaphor"), opt("transition"), opt("narration")
+    scenes = [
+        Scene(index=0,
+              narration=f"{spc.get('zh','')}——眼前发生了不可能的事。",
+              narration_zh=f"{spc.get('zh','')}——眼前发生了不可能的事。",
+              on_screen_text=spc.get("zh", ""), seconds=4,
+              image_prompt=f"cinematic film still, {w.get('en','')}, {spc.get('en','')}",
+              motion_prompt="fast dramatic push-in revealing the impossible spectacle",
+              show_face=True),
+        Scene(index=1,
+              narration="在这个世界里，一切悬念才刚刚开始。",
+              narration_zh="在这个世界里，一切悬念才刚刚开始。",
+              on_screen_text="悬念升级", seconds=5,
+              image_prompt=f"cinematic wide shot establishing {w.get('en','')}, epic lighting",
+              motion_prompt="sweeping camera establishing the world", show_face=True),
+        Scene(index=2,
+              narration=f"{rev.get('zh','')}——你以为的，全错了。",
+              narration_zh=f"{rev.get('zh','')}——你以为的，全错了。",
+              on_screen_text=rev.get("zh", ""), seconds=5,
+              image_prompt=f"cinematic still, dramatic reversal moment, {rev.get('en','')}",
+              motion_prompt="whip pan into the reversal", show_face=True),
+        Scene(index=3,
+              narration=f"就在这一刻，{sp}——成了扭转全局的关键。",
+              narration_zh=f"就在这一刻，{sp}——成了扭转全局的关键。",
+              on_screen_text=sp, seconds=6,
+              image_prompt=f"cinematic hero shot, the selling point dramatized: {met.get('en','')}",
+              motion_prompt="speed-ramp into the climactic reveal, then a beat of stillness",
+              show_face=True),
+        Scene(index=4,
+              narration=f"{tr.get('zh','')}——故事，就是这条广告。",
+              narration_zh=f"{tr.get('zh','')}——故事，就是这条广告。",
+              on_screen_text=name, seconds=4,
+              image_prompt=f"cinematic transition into the brand, {tr.get('en','')}",
+              motion_prompt="seamless match-move from story world into the brand key visual",
+              show_face=False),
+        Scene(index=5,
+              narration=cta, narration_zh=cta, on_screen_text=cta, seconds=4,
+              image_prompt="clean cinematic brand end card, bold key visual, brand color",
+              motion_prompt="logo settles, promo text pops in", show_face=False),
+    ]
+    hook = spc.get("zh", "") or "等一下…"
+    s = Script(template="creative", language=cfg.language, hook=hook, cta=cta,
+               scenes=scenes, template_used="creative_narrative", hook_category="spectacle")
+    _ = nar  # 腔调在有 LLM 时影响台词；兜底脚本保留占位
+    return s
 
 
 def _parse_json(content: str) -> dict:
@@ -460,8 +604,28 @@ def _call_llm(cfg: TaskConfig, secrets: Secrets,
     return Script.from_dict(data)
 
 
+def _call_creative_llm(cfg: TaskConfig, secrets: Secrets,
+                       strategy: dict | None = None) -> Script:
+    messages = [
+        {"role": "system", "content": _CREATIVE_SYSTEM},
+        {"role": "user", "content": _creative_user_prompt(cfg, strategy)},
+    ]
+    data = _complete_json(
+        secrets, messages, 0.95, validate=lambda d: bool(d.get("scenes")),
+    )
+    data.setdefault("template", "creative")
+    data.setdefault("language", cfg.language)
+    data.setdefault("template_used", "creative_narrative")
+    data.setdefault("hook_category", "spectacle")
+    return Script.from_dict(data)
+
+
 def generate_script(cfg: TaskConfig, secrets: Secrets,
                     strategy: dict | None = None, mem: dict | None = None) -> Script:
+    if cfg.template == "creative":
+        if not secrets.llm_api_key:
+            return _creative_fallback(cfg, strategy)
+        return _call_creative_llm(cfg, secrets, strategy=strategy)
     if not secrets.llm_api_key:
         return _template_fallback(cfg)
     return _call_llm(cfg, secrets, strategy=strategy, mem=mem)
